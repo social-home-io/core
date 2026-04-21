@@ -1,0 +1,122 @@
+[project]
+name = "social-home"
+version = "1.0.0"
+requires-python = ">=3.14"
+license = {text = "Mozilla Public License 2.0"}
+license-files = ["LICENSE"]
+dependencies = [
+    "aiohttp>=3.9",
+    "aiosqlite>=0.19",
+    "orjson>=3.9",
+    "cryptography>=41",
+    "aiofiles>=23",
+    "pillow>=10",
+    "av>=13",
+    "python-multipart>=0.0.9",
+    "jinja2>=3.1",
+    "icalendar>=5.0",
+    # Federation WebRTC DataChannel transport (§4.2.3, §24.12). Primary
+    # SH-to-SH transport — webhook is fallback. Also required by the
+    # Global Federation Server (§24).
+    "libdatachannel>=0.21",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4",
+    "aiohttp[speedups]",
+    "freezegun",
+    "mypy>=1.10",
+    "ruff>=0.8",
+    "pre-commit>=3.8",
+]
+# Post-quantum signatures (hybrid Ed25519 + ML-DSA-65, FIPS 204).
+# Install with: pip install 'social-home[pq]'
+# Requires the host to have liboqs C library available; see
+# documentation/crypto.md for the migration rationale.
+pq = [
+    "oqs @ git+https://github.com/open-quantum-safe/liboqs-python@0.10.0",
+]
+# Global Federation Server (GFS) runtime deps — pulled by the
+# `social-home-global-server` console script.
+# Install with: pip install 'social-home[global-server]'
+global-server = [
+    "bcrypt>=4",                 # admin password hashing (spec §24.9)
+    "qrcode[pil]>=7",            # public-landing QR code rendering
+]
+
+[project.scripts]
+social-home-global-server = "social_home.global_server.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "security: spec §27 release-blocker protocol/security test",
+    "integration: real DB / real aiohttp client (§27.5)",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["social_home"]
+parallel = true
+
+[tool.coverage.report]
+fail_under = 90
+
+[tool.mypy]
+python_version = "3.14"
+# We opt out of full ``strict = true`` — the noisy checks (type-arg,
+# no-untyped-def on inner helpers, no-untyped-call) add hundreds of
+# annotations without catching real bugs. We keep the checks that
+# DO catch bugs: assignment mismatches, arg-type conflicts,
+# call-overload issues, return-value correctness, union-attr access.
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = false
+disallow_untyped_decorators = false
+no_implicit_optional = true
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+disallow_any_generics = false
+check_untyped_defs = true
+files = ["social_home"]
+# Tests use looser typing — fakes/mocks frequently disagree with
+# Protocols. Run mypy on production code only.
+exclude = '(^tests/|^client/)'
+
+
+[[tool.mypy.overrides]]
+# libdatachannel is an optional native dep with no stubs.
+module = ["libdatachannel", "libdatachannel.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# liboqs-python is shipped as an optional extra (pq). Deployments on
+# the classical sig_suite never import it, so mypy's missing-stubs
+# warning for ``oqs`` is a red herring.
+module = ["oqs", "oqs.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# pywebpush ships no type stubs.
+module = ["pywebpush", "pywebpush.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# orjson has no stubs in older releases.
+module = ["orjson"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# PyAV C bindings have no type stubs; the video_processor module
+# uses PyAV's untyped union-return APIs extensively.
+module = ["av", "av.*", "social_home.media.video_processor"]
+ignore_missing_imports = true
+disable_error_code = ["union-attr", "attr-defined", "arg-type"]

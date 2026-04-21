@@ -1,0 +1,18 @@
+{
+  "notification.post.created": "{author} hat einen neuen Beitrag verfasst",
+  "notification.post.commented": "{author} hat deinen Beitrag kommentiert",
+  "notification.task.assigned": "Dir wurde zugewiesen: {title}",
+  "notification.task.deadline_due": "Aufgabe heute fällig: {title}",
+  "notification.space.post.created": "Neuer Beitrag in {space_name}",
+  "notification.space.moderation.queued": "Ein Beitrag wartet auf Moderation",
+  "notification.space.join.approved": "Du bist dabei: {space_name}",
+  "notification.space.join.denied": "Deine Beitrittsanfrage wurde abgelehnt.",
+  "notification.space.remote_invite.accepted": "Deine Einladung wurde angenommen.",
+  "notification.space.remote_invite.declined": "Deine Einladung wurde abgelehnt.",
+  "notification.dm.received": "Neue Nachricht von {sender}",
+  "notification.dm.contact_requested": "{name} möchte dir schreiben",
+  "notification.calendar.event_created": "{author} hat einen Termin erstellt: {summary}",
+  "notification.bazaar.bid_received": "Neues Gebot für dein Angebot",
+  "notification.bazaar.bid_placed": "Neues Gebot für dein Angebot",
+  "notification.bazaar.offer_accepted": "Dein Angebot wurde angenommen"
+}

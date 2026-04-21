@@ -1,0 +1,18 @@
+{
+  "notification.post.created": "{author} posted a new update",
+  "notification.post.commented": "{author} commented on your post",
+  "notification.task.assigned": "You were assigned: {title}",
+  "notification.task.deadline_due": "Task due today: {title}",
+  "notification.space.post.created": "New post in {space_name}",
+  "notification.space.moderation.queued": "A post is awaiting moderation",
+  "notification.space.join.approved": "You're in: {space_name}",
+  "notification.space.join.denied": "Your join request was declined.",
+  "notification.space.remote_invite.accepted": "Your invite was accepted.",
+  "notification.space.remote_invite.declined": "Your invite was declined.",
+  "notification.dm.received": "New message from {sender}",
+  "notification.dm.contact_requested": "{name} would like to message you",
+  "notification.calendar.event_created": "{author} added an event: {summary}",
+  "notification.bazaar.bid_received": "New bid on your listing",
+  "notification.bazaar.bid_placed": "New bid on your listing",
+  "notification.bazaar.offer_accepted": "Your offer was accepted"
+}

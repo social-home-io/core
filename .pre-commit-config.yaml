@@ -1,0 +1,77 @@
+# Pre-commit hooks for social-home/core.
+#
+# Install:   pip install pre-commit && pre-commit install
+# Run once:  pre-commit run --all-files
+#
+# Hooks run only against staged files by default; the frontend hook
+# skips cleanly when no TS/TSX file is staged so most commits stay fast.
+
+default_language_version:
+  python: python3.14
+
+repos:
+  # ── Hygiene ────────────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: detect-private-key
+
+  # ── Python lint + format via ruff ──────────────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.0
+    hooks:
+      - id: ruff
+        name: ruff (lint)
+        args: ["--fix"]
+        types_or: [python, pyi]
+      - id: ruff-format
+        name: ruff (format)
+        types_or: [python, pyi]
+
+  # ── Python type-check via mypy ─────────────────────────────────────────
+  # Uses the project's own mypy config from pyproject.toml.
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      - id: mypy
+        name: mypy (social_home)
+        files: ^social_home/
+        additional_dependencies:
+          - types-aiofiles
+        args: ["--config-file=pyproject.toml"]
+
+  # ── Frontend: lint + typecheck + build ─────────────────────────────────
+  # A local hook so pre-commit reuses the repo's pnpm install; CI still
+  # runs the same commands via `.github/workflows/ci.yml`.
+  - repo: local
+    hooks:
+      - id: frontend-lint
+        name: frontend — eslint
+        language: system
+        entry: bash -c 'cd client && pnpm run lint'
+        pass_filenames: false
+        files: ^client/.*\.(ts|tsx|js|jsx)$
+
+      - id: frontend-typecheck
+        name: frontend — tsc --noEmit
+        language: system
+        entry: bash -c 'cd client && pnpm run typecheck'
+        pass_filenames: false
+        files: ^client/.*\.(ts|tsx)$
+
+      - id: frontend-build
+        name: frontend — vite build
+        language: system
+        stages: [pre-push]
+        entry: bash -c 'cd client && pnpm run build'
+        pass_filenames: false
+        files: ^client/.*\.(ts|tsx|css|html|json)$

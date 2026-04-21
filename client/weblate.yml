@@ -1,0 +1,44 @@
+# Weblate component definition for Social Home UI strings (§30.8.1).
+#
+# Weblate watches this repository and opens new English keys for
+# community translation as soon as they land on ``main``. Translators
+# work in-browser; Weblate commits back to the ``i18n/weblate`` branch,
+# and a maintainer merges the PR.
+#
+# How to set this up
+# ──────────────────
+# 1. Deploy Weblate (Docker or ``pip install weblate``) — it can run
+#    as an add-on alongside Social Home.
+# 2. Create a project → "Add component" → paste this file's URL as the
+#    remote YAML source, or upload it via Settings → Add component.
+# 3. Add the target languages listed in spec §30.9 (de, nl, fr, es).
+# 4. Set the VCS push token: GitHub PAT with ``contents:write`` on
+#    ``social-home-io/core``.
+# 5. Enable "Automatically push on commit" and "Merge style: rebase".
+# 6. Translators register at the public Weblate URL — no invite is
+#    required for OSS projects. Link the registration URL from the
+#    in-app locale picker (§23.41 "Contribute translations…").
+#
+# No CLI tooling is required: Weblate polls the repo, there is no
+# ``i18n:push`` step. The ``i18n:check`` script below is the only CI
+# gate — it fails the PR when a ``t()`` call in ``src/`` has no
+# matching key in ``src/i18n/locales/en.json``.
+
+component:
+  name:            Social Home UI
+  slug:            social-home
+  repo:            https://github.com/social-home-io/core
+  branch:          main
+  filemask:        client/src/i18n/locales/*.json
+  file_format:     json-flat                    # flat dotted keys
+  template:        client/src/i18n/locales/en.json
+  new_base:        client/src/i18n/locales/en.json
+  source_language: en
+  license:         MPL-2.0
+  push_on_commit:  true
+  commit_message:  "i18n: update {language} translations"
+  push_branch:     i18n/weblate                 # merged via PR
+  # Translator-context file — each key mirrors en.json; value is a
+  # short hint shown in Weblate's editor next to the string.
+  # Weblate auto-picks it up when ``-notes`` sits next to the locale.
+  check_flags:     ignore-same,placeholders

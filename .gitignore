@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Data / secrets
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+/data/
+social_home.toml
+.env
+.env.*
+integration_token.txt
+
+# Frontend
+client/node_modules/
+client/dist/
+client/coverage/
+social_home/static/*
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store

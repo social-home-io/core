@@ -1,0 +1,279 @@
+"""Bazaar (marketplace) routes — /api/bazaar/* (§5.2 / §9 / §23.15)."""
+
+from __future__ import annotations
+
+from aiohttp import web
+
+from ..app_keys import bazaar_repo_key, bazaar_service_key
+from ..repositories.bazaar_repo import BidStateError
+from ..security import error_response
+from ..services.bazaar_service import (
+    _UNSET,
+    BazaarServiceError,
+    BidNotFoundError,
+    ListingNotFoundError,
+)
+from .base import BaseView
+
+
+def _listing_dict(listing) -> dict:
+    return {
+        "post_id":        listing.post_id,
+        "seller_user_id": listing.seller_user_id,
+        "mode":           listing.mode.value,
+        "title":          listing.title,
+        "description":    listing.description,
+        "image_urls":     list(listing.image_urls),
+        "end_time":       listing.end_time,
+        "currency":       listing.currency,
+        "status":         listing.status.value,
+        "price":          listing.price,
+        "start_price":    listing.start_price,
+        "step_price":     listing.step_price,
+        "winner_user_id": listing.winner_user_id,
+        "winning_price":  listing.winning_price,
+        "sold_at":        listing.sold_at,
+        "created_at":     listing.created_at,
+    }
+
+
+def _bid_dict(bid) -> dict:
+    return {
+        "id":               bid.id,
+        "listing_post_id":  bid.listing_post_id,
+        "bidder_user_id":   bid.bidder_user_id,
+        "amount":           bid.amount,
+        "message":          bid.message,
+        "accepted":         bid.accepted,
+        "rejected":         bid.rejected,
+        "rejection_reason": bid.rejection_reason,
+        "withdrawn":        bid.withdrawn,
+        "created_at":       bid.created_at,
+    }
+
+
+def _int_or_none(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid integer: {value!r}") from exc
+
+
+class BazaarCollectionView(BaseView):
+    """``GET /api/bazaar`` — list listings, optionally filtered.
+
+    Query params:
+      * ``seller=me`` — listings owned by the caller (any status)
+      * ``status=active|sold|expired|cancelled`` — filter (default: active)
+
+    ``POST /api/bazaar`` creates a new listing.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        repo = self.svc(bazaar_repo_key)
+        q = self.request.query
+        if q.get("seller") == "me":
+            listings = await repo.list_by_seller(ctx.user_id)
+        else:
+            listings = await repo.list_active()
+        return web.json_response([_listing_dict(lst) for lst in listings])
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        await self.require_household_feature("bazaar")
+        svc = self.svc(bazaar_service_key)
+        body = await self.body()
+
+        title = str(body.get("title") or "").strip()
+        if not title:
+            return error_response(422, "UNPROCESSABLE", "title is required.")
+        mode = body.get("mode")
+        if not mode:
+            return error_response(422, "UNPROCESSABLE", "mode is required.")
+        currency = str(body.get("currency") or "").upper().strip()
+        if not currency:
+            return error_response(
+                422, "UNPROCESSABLE", "currency is required.",
+            )
+
+        image_urls = body.get("image_urls") or []
+        if not isinstance(image_urls, list):
+            return error_response(
+                422, "UNPROCESSABLE", "image_urls must be a list.",
+            )
+
+        try:
+            listing = await svc.create_listing(
+                seller_user_id=ctx.user_id,
+                mode=mode,
+                title=title,
+                currency=currency,
+                description=body.get("description"),
+                duration_days=int(body.get("duration_days") or 7),
+                image_urls=tuple(str(u) for u in image_urls),
+                price=_int_or_none(body.get("price")),
+                start_price=_int_or_none(body.get("start_price")),
+                step_price=_int_or_none(body.get("step_price")),
+            )
+        except ValueError as exc:
+            return error_response(422, "UNPROCESSABLE", str(exc))
+        return web.json_response(_listing_dict(listing), status=201)
+
+
+class BazaarDetailView(BaseView):
+    """``GET/PATCH/DELETE /api/bazaar/{id}``."""
+
+    async def get(self) -> web.Response:
+        self.user  # auth check
+        listing_id = self.match("id")
+        repo = self.svc(bazaar_repo_key)
+        listing = await repo.get_listing(listing_id)
+        if listing is None:
+            return error_response(404, "NOT_FOUND", "Listing not found.")
+        return web.json_response(_listing_dict(listing))
+
+    async def patch(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(bazaar_service_key)
+        body = await self.body()
+        title = body.get("title", _UNSET)
+        description = body.get("description", _UNSET)
+        try:
+            listing = await svc.update_listing(
+                post_id=self.match("id"),
+                actor_user_id=ctx.user_id,
+                title=title,
+                description=description,
+            )
+        except ListingNotFoundError:
+            return error_response(404, "NOT_FOUND", "Listing not found.")
+        except PermissionError as exc:
+            return error_response(403, "FORBIDDEN", str(exc))
+        except ValueError as exc:
+            return error_response(422, "UNPROCESSABLE", str(exc))
+        except BazaarServiceError as exc:
+            return error_response(409, "CONFLICT", str(exc))
+        return web.json_response(_listing_dict(listing))
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(bazaar_service_key)
+        try:
+            await svc.cancel_listing(
+                post_id=self.match("id"), actor_user_id=ctx.user_id,
+            )
+        except ListingNotFoundError:
+            return error_response(404, "NOT_FOUND", "Listing not found.")
+        except PermissionError as exc:
+            return error_response(403, "FORBIDDEN", str(exc))
+        except BazaarServiceError as exc:
+            return error_response(409, "CONFLICT", str(exc))
+        return web.Response(status=204)
+
+
+class BazaarBidCollectionView(BaseView):
+    """``GET/POST /api/bazaar/{id}/bids``."""
+
+    async def get(self) -> web.Response:
+        self.user  # auth check
+        svc = self.svc(bazaar_service_key)
+        bids = await svc.list_bids(self.match("id"))
+        return web.json_response([_bid_dict(b) for b in bids])
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        await self.require_household_feature("bazaar")
+        svc = self.svc(bazaar_service_key)
+        body = await self.body()
+
+        amount = body.get("amount")
+        if amount is None:
+            return error_response(422, "UNPROCESSABLE", "amount is required.")
+        try:
+            amount_i = int(amount)
+        except (TypeError, ValueError):
+            return error_response(
+                422, "UNPROCESSABLE", "amount must be an integer.",
+            )
+
+        try:
+            bid = await svc.place_bid(
+                listing_post_id=self.match("id"),
+                bidder_user_id=ctx.user_id,
+                amount=amount_i,
+                message=body.get("message"),
+            )
+        except ListingNotFoundError:
+            return error_response(404, "NOT_FOUND", "Listing not found.")
+        except ValueError as exc:
+            return error_response(422, "UNPROCESSABLE", str(exc))
+        return web.json_response(_bid_dict(bid), status=201)
+
+
+class BazaarBidDetailView(BaseView):
+    """``DELETE /api/bazaar/{id}/bids/{bid_id}`` — bidder withdraws."""
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(bazaar_service_key)
+        try:
+            await svc.withdraw_bid(
+                bid_id=self.match("bid_id"), actor_user_id=ctx.user_id,
+            )
+        except BidNotFoundError:
+            return error_response(404, "NOT_FOUND", "Bid not found.")
+        except PermissionError as exc:
+            return error_response(403, "FORBIDDEN", str(exc))
+        except BazaarServiceError as exc:
+            return error_response(409, "BID_STATE_ERROR", str(exc))
+        return web.Response(status=204)
+
+
+class BazaarBidAcceptView(BaseView):
+    """``POST /api/bazaar/{id}/bids/{bid_id}/accept``."""
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(bazaar_service_key)
+        try:
+            await svc.accept_offer(
+                bid_id=self.match("bid_id"), actor_user_id=ctx.user_id,
+            )
+        except BidNotFoundError:
+            return error_response(404, "NOT_FOUND", "Bid not found.")
+        except ListingNotFoundError:
+            return error_response(404, "NOT_FOUND", "Listing not found.")
+        except PermissionError as exc:
+            return error_response(403, "FORBIDDEN", str(exc))
+        except BazaarServiceError as exc:
+            return error_response(409, "BID_STATE_ERROR", str(exc))
+        except BidStateError as exc:
+            return error_response(409, "BID_STATE_ERROR", str(exc))
+        return web.json_response({"ok": True})
+
+
+class BazaarBidRejectView(BaseView):
+    """``POST /api/bazaar/{id}/bids/{bid_id}/reject``."""
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(bazaar_service_key)
+        body = await self.body()
+        try:
+            await svc.reject_offer(
+                bid_id=self.match("bid_id"),
+                actor_user_id=ctx.user_id,
+                reason=(body.get("reason") or None),
+            )
+        except BidNotFoundError:
+            return error_response(404, "NOT_FOUND", "Bid not found.")
+        except ListingNotFoundError:
+            return error_response(404, "NOT_FOUND", "Listing not found.")
+        except PermissionError as exc:
+            return error_response(403, "FORBIDDEN", str(exc))
+        except BazaarServiceError as exc:
+            return error_response(409, "BID_STATE_ERROR", str(exc))
+        return web.json_response({"ok": True})

@@ -1,0 +1,36 @@
+{
+  "__comment": "Locale registry for the Social Home UI (spec §30.9). Each entry describes a target translation — used by the in-app locale picker and by CI checks. Completion percentages live in Weblate, not in this file.",
+  "locales": {
+    "en": {
+      "native_name": "English",
+      "english_name": "English",
+      "rtl": false,
+      "source": true
+    },
+    "de": {
+      "native_name": "Deutsch",
+      "english_name": "German",
+      "rtl": false,
+      "source": false
+    },
+    "nl": {
+      "native_name": "Nederlands",
+      "english_name": "Dutch",
+      "rtl": false,
+      "source": false
+    },
+    "fr": {
+      "native_name": "Français",
+      "english_name": "French",
+      "rtl": false,
+      "source": false
+    },
+    "es": {
+      "native_name": "Español",
+      "english_name": "Spanish",
+      "rtl": false,
+      "source": false
+    }
+  },
+  "weblate_url": "https://weblate.social-home.io/projects/social-home/ui/"
+}

@@ -1,0 +1,109 @@
+name: Publish
+
+# Fire when a release tag is pushed OR a GitHub release is published.
+# Both paths converge on the same jobs so we can cut a release from the
+# UI or from ``git tag v1.2.3 && git push --tags``.
+on:
+  push:
+    tags: ["v*.*.*"]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Python package → PyPI via trusted publisher (OIDC) ──────────────────
+  pypi:
+    name: Publish social-home to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write          # OIDC — no API token needed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install build tooling
+        run: pip install build
+      - name: Build sdist + wheel
+        run: python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Trusted publisher — configure at pypi.org/manage/account/publishing/
+        # Project: social-home, Workflow: publish.yml, Environment: pypi
+
+  # ── Docker core image → GHCR ────────────────────────────────────────────
+  docker-core:
+    name: Build & push core Docker image
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Derive image tag
+        id: tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "ref=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${{ github.event.release.tag_name || 'latest' }}" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.sh
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/social-home-io/core:latest
+            ghcr.io/social-home-io/core:${{ steps.tag.outputs.ref }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+  # ── Docker GFS image → GHCR ─────────────────────────────────────────────
+  # Separate job so a failure in the GFS build doesn't block the core push.
+  docker-gfs:
+    name: Build & push GFS Docker image
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Derive image tag
+        id: tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "ref=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${{ github.event.release.tag_name || 'latest' }}" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.gfs
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/social-home-io/gfs:latest
+            ghcr.io/social-home-io/gfs:${{ steps.tag.outputs.ref }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max

@@ -1,0 +1,232 @@
+/**
+ * Design Tokens (§23.111) — CSS custom properties.
+ *
+ * Modern 2026 palette: indigo-500 primary, emerald success, amber
+ * warning, red danger. Dark mode uses warm slate tones (Tailwind
+ * slate-950/800/100) rather than saturated navy. Shadows are
+ * two-layer so hover lifts read cleanly on every surface.
+ */
+:root {
+  /* ── Brand colors ─────────────────────────────────────────────── */
+  --sh-primary:         #6366F1;     /* indigo-500 */
+  --sh-primary-hover:   #4F46E5;     /* indigo-600 */
+  --sh-primary-soft:    #EEF2FF;     /* indigo-50  — tinted surfaces */
+  --sh-danger:          #EF4444;     /* red-500 */
+  --sh-danger-hover:    #DC2626;     /* red-600 */
+  --sh-success:         #10B981;     /* emerald-500 */
+  --sh-warning:         #F59E0B;     /* amber-500 */
+
+  /* ── Surface ladder ───────────────────────────────────────────── */
+  --sh-bg:              #FFFFFF;
+  --sh-bg-secondary:    #F8FAFC;     /* slate-50 — app chrome */
+  --sh-bg-tertiary:     #F1F5F9;     /* slate-100 — nested cards */
+  --sh-text:            #0F172A;     /* slate-900 — crisper than #1A1A1A */
+  --sh-text-muted:      #64748B;     /* slate-500 — 7.1:1 on bg */
+  --sh-border:          #E2E8F0;     /* slate-200 — softer than DEE2E6 */
+  --sh-border-strong:   #CBD5E1;     /* slate-300 — divider on hover */
+
+  /* ── Elevation ladder ─────────────────────────────────────────── */
+  --sh-shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --sh-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05),
+                  0 1px 3px rgba(15, 23, 42, 0.08);
+  --sh-shadow-md: 0 4px 6px -1px rgba(15, 23, 42, 0.08),
+                  0 2px 4px -2px rgba(15, 23, 42, 0.06);
+  --sh-shadow-lg: 0 10px 15px -3px rgba(15, 23, 42, 0.10),
+                  0 4px 6px -4px rgba(15, 23, 42, 0.08);
+  --sh-shadow-xl: 0 20px 25px -5px rgba(15, 23, 42, 0.12),
+                  0 8px 10px -6px rgba(15, 23, 42, 0.08);
+  /* Legacy alias — pre-existing rules use a flat --sh-shadow. */
+  --sh-shadow:    var(--sh-shadow-sm);
+
+  /* ── Typography ───────────────────────────────────────────────── */
+  --sh-font-family:         -apple-system, BlinkMacSystemFont, 'Inter',
+                            'Segoe UI', Roboto, sans-serif;
+  --sh-font-family-display: 'Inter', -apple-system, BlinkMacSystemFont,
+                            'Segoe UI', system-ui, sans-serif;
+  --sh-font-family-mono:    ui-monospace, 'SF Mono', 'Menlo',
+                            'Cascadia Code', 'Source Code Pro', monospace;
+  --sh-font-size-xs:    0.75rem;
+  --sh-font-size-sm:    0.875rem;
+  --sh-font-size-base:  1rem;
+  --sh-font-size-lg:    1.125rem;
+  --sh-font-size-xl:    1.5rem;
+  --sh-font-size-2xl:   2rem;
+  --sh-font-size-3xl:   2.5rem;
+  --sh-line-height-tight: 1.25;
+  --sh-line-height-snug:  1.4;
+  --sh-line-height-base:  1.55;
+  --sh-line-height-relaxed: 1.7;
+
+  /* ── Spacing ──────────────────────────────────────────────────── */
+  --sh-space-xs:  0.25rem;
+  --sh-space-sm:  0.5rem;
+  --sh-space-md:  1rem;
+  --sh-space-lg:  1.5rem;
+  --sh-space-xl:  2rem;
+  --sh-space-2xl: 3rem;
+  --sh-space-3xl: 4rem;
+
+  /* ── Radii ────────────────────────────────────────────────────── */
+  --sh-radius-sm:   6px;     /* bumped from 4 — softer on buttons */
+  --sh-radius-md:   10px;    /* bumped from 8 — cards feel less corporate */
+  --sh-radius-lg:   14px;
+  --sh-radius-xl:   20px;
+  --sh-radius-full: 9999px;
+
+  /* ── Motion ───────────────────────────────────────────────────── */
+  /* Snappy spring-like curve for affordances (hover, toggle, press). */
+  --sh-ease-out:   cubic-bezier(0.22, 1, 0.36, 1);
+  --sh-ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+  --sh-transition-fast:   150ms var(--sh-ease-out);
+  --sh-transition-normal: 250ms var(--sh-ease-out);
+  --sh-transition-slow:   400ms var(--sh-ease-out);
+
+  /* ── Z-index layers ───────────────────────────────────────────── */
+  --sh-z-dropdown: 100;
+  --sh-z-modal:    200;
+  --sh-z-toast:    300;
+  --sh-z-lightbox: 400;
+
+  /* §23.125.4 — Household theme custom properties.
+   * HouseholdThemeStudio writes to these; they default to the tokens
+   * above so untouched households look identical. */
+  --hh-accent:        var(--sh-primary);
+  --hh-surface:       var(--sh-bg);
+  --hh-surface-dark:  #0F172A;
+  --hh-font:          var(--sh-font-family);
+  --hh-radius-card:   var(--sh-radius-md);
+  --hh-radius-btn:    var(--sh-radius-md);
+  --hh-density-gap:   var(--sh-space-md);   /* "comfortable" */
+}
+
+/* Dark mode (§23.35) — warm slate, modern tone. */
+.sh-theme-dark {
+  --sh-primary:        #818CF8;  /* indigo-400 — more readable on dark */
+  --sh-primary-hover:  #6366F1;  /* indigo-500 */
+  --sh-primary-soft:   #1E1B4B;  /* indigo-950 — tinted dark surface */
+  --sh-success:        #34D399;  /* emerald-400 */
+  --sh-warning:        #FBBF24;  /* amber-400 */
+  --sh-danger:         #F87171;  /* red-400 */
+  --sh-danger-hover:   #EF4444;
+
+  --sh-bg:             #0F172A;  /* slate-950 */
+  --sh-bg-secondary:   #1E293B;  /* slate-800 */
+  --sh-bg-tertiary:    #334155;  /* slate-700 */
+  --sh-text:           #F1F5F9;  /* slate-100 */
+  --sh-text-muted:     #94A3B8;  /* slate-400 */
+  --sh-border:         #334155;  /* slate-700 */
+  --sh-border-strong:  #475569;  /* slate-600 */
+
+  --sh-shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --sh-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5),
+                  0 1px 3px rgba(0, 0, 0, 0.4);
+  --sh-shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.5),
+                  0 2px 4px -2px rgba(0, 0, 0, 0.4);
+  --sh-shadow-lg: 0 10px 20px -3px rgba(0, 0, 0, 0.6),
+                  0 4px 8px -4px rgba(0, 0, 0, 0.4);
+  --sh-shadow-xl: 0 20px 30px -5px rgba(0, 0, 0, 0.7),
+                  0 8px 12px -6px rgba(0, 0, 0, 0.5);
+  --sh-shadow:    var(--sh-shadow-sm);
+}
+.sh-theme-dark :focus-visible {
+  outline-color: #A5B4FC;    /* indigo-300 — higher luminance on slate */
+}
+
+/* Responsive breakpoints (§23.113) */
+@media (max-width: 768px) {
+  :root { --sh-font-size-base: 0.9375rem; }
+  .sh-sidenav { display: none; }
+  .sh-mobile-nav { display: flex; }
+}
+@media (min-width: 769px) {
+  .sh-mobile-nav { display: none; }
+}
+@media (min-width: 1200px) {
+  .sh-main { max-width: 800px; margin: 0 auto; }
+}
+
+/* Motion (§23.112) */
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0ms !important; animation-duration: 0ms !important; }
+}
+
+/* Connection status dot (§23.86) */
+.sh-status-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--sh-radius-full);
+  flex-shrink: 0;
+}
+.sh-status-dot--active {
+  background-color: var(--sh-success);
+}
+.sh-status-dot--unreachable {
+  background-color: var(--sh-danger);
+}
+.sh-status-dot--pending {
+  background-color: var(--sh-text-muted);
+}
+
+/* Connection type badge */
+.sh-type-badge {
+  display: inline-block;
+  font-size: var(--sh-font-size-xs);
+  padding: 1px 6px;
+  border-radius: var(--sh-radius-sm);
+  background: var(--sh-bg-secondary);
+  border: 1px solid var(--sh-border);
+  color: var(--sh-text-muted);
+  white-space: nowrap;
+}
+
+/* Skeleton animation (§23.118) */
+@keyframes sh-shimmer {
+  0% { background-position: -200px 0; }
+  100% { background-position: calc(200px + 100%) 0; }
+}
+.sh-skeleton-line, .sh-skeleton-circle, .sh-skeleton-rect {
+  background: linear-gradient(90deg, var(--sh-bg-secondary) 25%, var(--sh-border) 50%, var(--sh-bg-secondary) 75%);
+  background-size: 200px 100%;
+  animation: sh-shimmer 1.5s infinite;
+}
+
+/* Accessibility — skip-to-main-content link (§23.21).
+ * Hidden off-screen until it receives keyboard focus, at which point it
+ * slides in from the top-left so a keyboard user can jump past the nav. */
+.sh-skip-link {
+  position: absolute;
+  top: -9999px;
+  left: 0;
+  background: var(--sh-primary);
+  color: #fff;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  text-decoration: none;
+  font-weight: 600;
+  z-index: 10000;
+  border-radius: 0 0 var(--sh-radius-sm) 0;
+}
+.sh-skip-link:focus {
+  top: 0;
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+/* PWA install prompt banner (§23.114) */
+.sh-install-prompt {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  background: var(--sh-primary);
+  color: #fff;
+  border-radius: 0 0 var(--sh-radius-md) var(--sh-radius-md);
+  box-shadow: var(--sh-shadow);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-install-prompt-text { font-weight: 600; }

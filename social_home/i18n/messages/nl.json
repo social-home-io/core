@@ -1,0 +1,18 @@
+{
+  "notification.post.created": "{author} heeft een nieuw bericht geplaatst",
+  "notification.post.commented": "{author} heeft op je bericht gereageerd",
+  "notification.task.assigned": "Toegewezen: {title}",
+  "notification.task.deadline_due": "Taak verloopt vandaag: {title}",
+  "notification.space.post.created": "Nieuw bericht in {space_name}",
+  "notification.space.moderation.queued": "Een bericht wacht op moderatie",
+  "notification.space.join.approved": "Je zit erin: {space_name}",
+  "notification.space.join.denied": "Je deelname-aanvraag is afgewezen.",
+  "notification.space.remote_invite.accepted": "Je uitnodiging is aanvaard.",
+  "notification.space.remote_invite.declined": "Je uitnodiging is afgewezen.",
+  "notification.dm.received": "Nieuw bericht van {sender}",
+  "notification.dm.contact_requested": "{name} wil je een bericht sturen",
+  "notification.calendar.event_created": "{author} voegde een evenement toe: {summary}",
+  "notification.bazaar.bid_received": "Nieuw bod op je advertentie",
+  "notification.bazaar.bid_placed": "Nieuw bod op je advertentie",
+  "notification.bazaar.offer_accepted": "Je bod is geaccepteerd"
+}
