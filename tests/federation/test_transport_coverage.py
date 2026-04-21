@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 
+import aiolibdatachannel as rtc
 import pytest
 
 from social_home.domain.federation import FederationEventType
@@ -247,6 +248,7 @@ async def test_peer_send_when_ready_writes_frame():
     class _ReadyChannel:
         def __init__(self) -> None:
             self.sent: list = []
+            self.buffered_amount = 0
 
         async def send(self, data):
             self.sent.append(data)
@@ -260,7 +262,34 @@ async def test_peer_send_when_ready_writes_frame():
     assert ch.sent
 
 
-async def test_peer_send_swallows_exception():
+async def test_peer_send_drops_frame_when_over_hwm():
+    """Frames are dropped when buffered_amount ≥ HWM."""
+    events, signaling = await _collect_signals()
+    peer = _RtcPeer(
+        instance_id="p",
+        ice_servers=None,
+        signaling=signaling,
+        inbound=_noop_inbound,
+    )
+
+    class _SaturatedChannel:
+        def __init__(self, buffered: int) -> None:
+            self.sent: list = []
+            self.buffered_amount = buffered
+
+        async def send(self, data):
+            self.sent.append(data)
+
+    ch = _SaturatedChannel(buffered=peer._send_hwm + 1)
+    peer._channel = ch  # type: ignore[attr-defined]
+    peer._open.set()
+
+    ok = await peer.send({"k": "v"})
+    assert ok is False
+    assert ch.sent == []  # send was skipped entirely
+
+
+async def test_peer_send_returns_false_on_rtc_error():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
@@ -270,8 +299,11 @@ async def test_peer_send_swallows_exception():
     )
 
     class _RaisingChannel:
+        def __init__(self) -> None:
+            self.buffered_amount = 0
+
         async def send(self, data):
-            raise RuntimeError("nope")
+            raise rtc.RTCError("nope")
 
     peer._channel = _RaisingChannel()  # type: ignore[attr-defined]
     peer._open.set()
@@ -339,7 +371,7 @@ async def test_peer_drain_channel_marks_open_then_closed():
 
 
 async def test_peer_drain_channel_handles_wait_open_failure():
-    """If wait_open raises, the loop logs and returns without crashing."""
+    """If wait_open raises an rtc error, the loop logs and returns cleanly."""
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
@@ -350,7 +382,7 @@ async def test_peer_drain_channel_handles_wait_open_failure():
 
     class _BadChannel:
         async def wait_open(self) -> None:
-            raise RuntimeError("no DTLS")
+            raise rtc.RTCError("no DTLS")
 
     await peer._drain_channel(_BadChannel())
     # Peer never reached open state.
@@ -431,8 +463,8 @@ async def test_peer_drain_channel_skips_malformed_frame():
     assert received == []
 
 
-async def test_peer_drain_ice_handles_exceptions():
-    """Exceptions inside the ICE iterator are swallowed."""
+async def test_peer_drain_ice_handles_rtc_errors():
+    """rtc errors inside the ICE iterator are swallowed + logged."""
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
         instance_id="p",
@@ -444,7 +476,7 @@ async def test_peer_drain_ice_handles_exceptions():
     class _BadPc:
         def ice_candidates(self):
             async def _it():
-                raise RuntimeError("nope")
+                raise rtc.RTCError("gathering aborted")
                 yield  # pragma: no cover — after raise
             return _it()
 
@@ -466,6 +498,9 @@ async def test_peer_drain_incoming_channel_ignores_wrong_label():
         def __init__(self, label):
             self.label = label
 
+        def set_buffered_amount_low_threshold(self, n):
+            self._hwm = n
+
         async def wait_open(self):
             return None
 
@@ -486,6 +521,9 @@ async def test_peer_drain_incoming_channel_ignores_wrong_label():
                 yield _FakeCh("other-label")  # skipped
                 yield good  # accepted
             return _gen()
+
+        def spawn_task(self, coro):
+            return asyncio.create_task(coro)
 
     peer._pc = _Pc()  # type: ignore[attr-defined]
     await peer._drain_incoming_channel()

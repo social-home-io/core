@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import asyncio
 
+import aiolibdatachannel as rtc
+import pytest
+
 from social_home.federation.sync_rtc import (
     CHANNEL_LABEL,
+    SEND_HWM_BYTES,
     SyncRtcSession,
     _build_rtc_config,
 )
@@ -110,6 +114,7 @@ async def test_send_chunk_writes_to_channel():
     class _FakeCh:
         def __init__(self) -> None:
             self.sent: list = []
+            self.buffered_amount = 0
 
         async def send(self, data):
             self.sent.append(data)
@@ -118,6 +123,32 @@ async def test_send_chunk_writes_to_channel():
     s._channel = ch  # type: ignore[attr-defined]
     await s.send_chunk(b"hello")
     assert ch.sent == [b"hello"]
+
+
+async def test_send_chunk_raises_when_over_hwm():
+    """Backpressured channel → ConnectionError so sync falls back to relay."""
+    s = SyncRtcSession(
+        sync_id="sid",
+        space_id="sp",
+        requester_instance_id="r",
+        provider_instance_id="p",
+        role="provider",
+    )
+    await s.create_offer()
+
+    class _FullCh:
+        def __init__(self) -> None:
+            self.sent: list = []
+            self.buffered_amount = SEND_HWM_BYTES + 1
+
+        async def send(self, data):
+            self.sent.append(data)
+
+    ch = _FullCh()
+    s._channel = ch  # type: ignore[attr-defined]
+    with pytest.raises(ConnectionError):
+        await s.send_chunk(b"hello")
+    assert ch.sent == []
 
 
 # ─── _watch_channel / _watch_incoming drain loops ───────────────────────
@@ -163,7 +194,7 @@ async def test_watch_channel_handles_wait_open_failure():
 
     class _BadCh:
         async def wait_open(self) -> None:
-            raise RuntimeError("handshake failed")
+            raise rtc.RTCError("handshake failed")
 
     await s._watch_channel(_BadCh())
     # Should never have flipped ready.
@@ -183,6 +214,9 @@ async def test_watch_incoming_ignores_wrong_label():
         def __init__(self, label):
             self.label = label
 
+        def set_buffered_amount_low_threshold(self, n):
+            self._hwm = n
+
         async def wait_open(self):
             return None
 
@@ -197,6 +231,9 @@ async def test_watch_incoming_ignores_wrong_label():
                 yield _FakeCh("wrong")
                 yield good
             return _gen()
+
+        def spawn_task(self, coro):
+            return asyncio.create_task(coro)
 
     s._pc = _FakePc()  # type: ignore[attr-defined]
     await s._watch_incoming()

@@ -24,6 +24,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import aiohttp
+import aiolibdatachannel as rtc
 from aiohttp import web
 
 from . import app_keys as K
@@ -709,6 +710,13 @@ def create_app(config: Config | None = None) -> web.Application:
 
     # Configure logging
     logging.basicConfig(level=getattr(logging, config.log_level, logging.INFO))
+
+    # Route libdatachannel's native ICE/DTLS/SCTP logs through Python's
+    # logging module so operators see them in the same stream they
+    # already watch. The adapter derives the native filter level from
+    # the Python logger's effective level, so INFO-level deployments
+    # pay no formatting cost for DEBUG traffic.
+    rtc.install_python_logger(logging.getLogger("aiolibdatachannel"))
 
     # ── Database ─────────────────────────────────────────────────────────
     db = AsyncDatabase(

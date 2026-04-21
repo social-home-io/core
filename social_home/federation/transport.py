@@ -60,6 +60,13 @@ RTC_READY_TIMEOUT_S: float = 10.0
 #: client's 30 s cadence (spec §24.12.5).
 PING_INTERVAL_S: float = 30.0
 
+#: High-water mark for a DataChannel's send buffer. When
+#: ``dc.buffered_amount`` exceeds this, we drop the frame and let the
+#: caller fall back to webhook instead of unbounded SCTP queuing.
+#: 1 MiB is well above a single envelope (~10 KB) but far under the
+#: default libdatachannel message size ceiling.
+SEND_HWM_BYTES: int = 1 << 20
+
 
 # ─── Webhook transport ─────────────────────────────────────────────────────
 
@@ -164,6 +171,7 @@ class _RtcPeer:
         "_closed",
         "_loop",
         "_expected_answer_from",
+        "_send_hwm",
     )
 
     def __init__(
@@ -173,6 +181,7 @@ class _RtcPeer:
         ice_servers: list[dict] | None,
         signaling: Callable[[FederationEventType, dict], Awaitable[None]],
         inbound: _InboundCallback,
+        send_hwm: int = SEND_HWM_BYTES,
     ) -> None:
         self.instance_id = instance_id
         self._ice_servers = ice_servers or []
@@ -186,6 +195,7 @@ class _RtcPeer:
         # S-14: on the offerer side we lock the answer origin to the
         # peer we invited. Mismatches are rejected with a warning.
         self._expected_answer_from: str | None = None
+        self._send_hwm = send_hwm
 
     # ─── Lifecycle ────────────────────────────────────────────────────────
 
@@ -195,6 +205,11 @@ class _RtcPeer:
         self._loop = asyncio.get_running_loop()
         self._pc = rtc.PeerConnection(_build_rtc_config(self._ice_servers))
         self._channel = await self._pc.create_data_channel(CHANNEL_LABEL)
+        # Ask aiolibdatachannel to notify us once the buffered amount
+        # drops below half the HWM — lets future refactors await
+        # backpressure instead of polling. For now we just read
+        # ``buffered_amount`` directly in ``send()``.
+        self._channel.set_buffered_amount_low_threshold(self._send_hwm // 2)
         # Tasks bound to the pc: auto-cancelled on pc.close().
         self._pc.spawn_task(self._drain_channel(self._channel))
         self._pc.spawn_task(self._drain_ice())
@@ -261,7 +276,7 @@ class _RtcPeer:
                 )
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001 — defensive
+        except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
             log.debug("fed RTC ICE drain to %s ended: %s", self.instance_id, exc)
 
     async def _drain_incoming_channel(self) -> None:
@@ -271,19 +286,22 @@ class _RtcPeer:
                 if ch.label != CHANNEL_LABEL:
                     continue
                 self._channel = ch
+                ch.set_buffered_amount_low_threshold(self._send_hwm // 2)
                 self._pc.spawn_task(self._drain_channel(ch))
                 return
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
             log.debug("fed RTC incoming-channel wait ended: %s", exc)
 
     async def _drain_channel(self, channel) -> None:
         """Consume inbound frames on a DataChannel and mark open/closed."""
         try:
             await channel.wait_open()
-        except Exception as exc:  # noqa: BLE001
-            log.warning("fed RTC channel never opened to %s: %s", self.instance_id, exc)
+        except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
+            log.warning(
+                "fed RTC channel never opened to %s: %s", self.instance_id, exc,
+            )
             return
         log.info("fed RTC channel open to %s", self.instance_id)
         self._open.set()
@@ -291,7 +309,7 @@ class _RtcPeer:
             async for msg in channel:
                 try:
                     data = orjson.loads(msg if isinstance(msg, (bytes, str)) else bytes(msg))
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001 — orjson raises orjson.JSONDecodeError + anything
                     log.warning(
                         "fed RTC malformed frame from %s: %s",
                         self.instance_id,
@@ -303,7 +321,7 @@ class _RtcPeer:
             raise
         except rtc.ConnectionClosedError:
             pass
-        except Exception as exc:  # noqa: BLE001 — defensive
+        except rtc.RTCError as exc:
             log.debug("fed RTC recv loop to %s ended: %s", self.instance_id, exc)
         log.info("fed RTC channel closed to %s", self.instance_id)
         self._open.clear()
@@ -320,14 +338,25 @@ class _RtcPeer:
         """Push a JSON frame over the DataChannel.
 
         Returns ``True`` on success, ``False`` if the channel isn't
-        currently open (caller should fall back to webhook).
+        currently open or the send buffer is over the HWM (caller
+        should fall back to webhook). Dropping under backpressure is
+        preferable to unbounded SCTP queueing.
         """
         if not self.is_ready or self._channel is None:
+            return False
+        buffered = self._channel.buffered_amount
+        if buffered >= self._send_hwm:
+            log.warning(
+                "fed RTC peer %s: buffered %d ≥ HWM %d — dropping frame",
+                self.instance_id,
+                buffered,
+                self._send_hwm,
+            )
             return False
         try:
             await self._channel.send(orjson.dumps(envelope_dict))
             return True
-        except Exception as exc:
+        except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
             log.warning("fed RTC send to %s failed: %s", self.instance_id, exc)
             return False
 
@@ -343,7 +372,7 @@ class _RtcPeer:
         if self._pc is not None:
             try:
                 self._pc.close()
-            except Exception:
+            except rtc.RTCError:
                 pass
         self._pc = None
         self._channel = None

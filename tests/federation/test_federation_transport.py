@@ -97,6 +97,7 @@ async def test_send_uses_rtc_when_peer_is_ready():
     class _FakeChannel:
         def __init__(self):
             self.sent = []
+            self.buffered_amount = 0
 
         async def send(self, data):
             self.sent.append(data)

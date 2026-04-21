@@ -37,9 +37,15 @@ class _FakeDataChannel:
         self.sent: list[bytes | str] = []
         self.is_closed = False
         self.is_open = False
+        # Tests can set this to simulate backpressure.
+        self.buffered_amount: int = 0
+        self._low_threshold: int = 0
         self._open = asyncio.Event()
         self._closed = asyncio.Event()
         self._inbox: asyncio.Queue = asyncio.Queue()
+
+    def set_buffered_amount_low_threshold(self, n: int) -> None:
+        self._low_threshold = n
 
     async def wait_open(self) -> None:
         # In tests we treat the channel as opened immediately so
@@ -167,6 +173,13 @@ class _FakeIceServer:
     credential: str | None = None
 
 
+def _fake_install_python_logger(*_a, **_kw):
+    """No-op stand-in for :func:`aiolibdatachannel.install_python_logger`."""
+    import logging as _logging
+
+    return _logging.getLogger("aiolibdatachannel")
+
+
 # Build fake module and inject before anything imports it.
 _fake_rtc = ModuleType("aiolibdatachannel")
 _fake_rtc.PeerConnection = _FakePeerConnection  # type: ignore[attr-defined]
@@ -178,6 +191,7 @@ _fake_rtc.IceServer = _FakeIceServer  # type: ignore[attr-defined]
 _fake_rtc.LocalDescription = _FakeLocalDescription  # type: ignore[attr-defined]
 _fake_rtc.ConnectionClosedError = _FakeConnectionClosedError  # type: ignore[attr-defined]
 _fake_rtc.RTCError = _FakeRTCError  # type: ignore[attr-defined]
+_fake_rtc.install_python_logger = _fake_install_python_logger  # type: ignore[attr-defined]
 sys.modules["aiolibdatachannel"] = _fake_rtc
 
 # ── Regular fixtures ─────────────────────────────────────────────────────

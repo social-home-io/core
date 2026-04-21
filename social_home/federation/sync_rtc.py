@@ -68,6 +68,12 @@ CHANNEL_LABEL: str = "sync-v1"
 #: ``SPACE_SYNC_DIRECT_FAILED {reason: "rate_limited"}``.
 MAX_SIGNALING_SESSIONS: int = 200
 
+#: High-water mark for a sync DataChannel's send buffer. Chunks are
+#: capped at CHUNK_SIZE_BUDGET_BYTES (§exporter.py), so 1 MiB keeps
+#: roughly 128 chunks buffered before we pause — plenty of headroom
+#: while still bounding memory growth on a stalled peer.
+SEND_HWM_BYTES: int = 1 << 20
+
 
 # ─── SyncRtcSession ───────────────────────────────────────────────────────
 
@@ -169,6 +175,9 @@ class SyncRtcSession:
             return
         if self.role == "provider":
             self._channel = await self._pc.create_data_channel(CHANNEL_LABEL)
+            self._channel.set_buffered_amount_low_threshold(
+                SEND_HWM_BYTES // 2,
+            )
             self._pc.spawn_task(self._watch_channel(self._channel))
         else:
             self._pc.spawn_task(self._watch_incoming())
@@ -179,11 +188,12 @@ class SyncRtcSession:
                 if ch.label != CHANNEL_LABEL:
                     continue
                 self._channel = ch
+                ch.set_buffered_amount_low_threshold(SEND_HWM_BYTES // 2)
                 self._pc.spawn_task(self._watch_channel(ch))
                 return
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
             log.debug(
                 "SyncRtcSession[%s]: incoming-channel wait ended: %s",
                 self.sync_id,
@@ -193,7 +203,7 @@ class SyncRtcSession:
     async def _watch_channel(self, channel) -> None:
         try:
             await channel.wait_open()
-        except Exception as exc:  # noqa: BLE001
+        except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
             log.warning(
                 "SyncRtcSession[%s]: channel failed to open: %s",
                 self.sync_id,
@@ -209,7 +219,7 @@ class SyncRtcSession:
         self._ready.set()
         try:
             await channel.wait_closed()
-        except Exception:  # noqa: BLE001
+        except (rtc.RTCError, rtc.ConnectionClosedError):
             pass
         log.info("SyncRtcSession[%s]: DataChannel closed", self.sync_id)
         self._closed = True
@@ -284,10 +294,18 @@ class SyncRtcSession:
     async def send_chunk(self, chunk_payload: bytes | str) -> None:
         """Send a ``SPACE_SYNC_CHUNK`` frame over the DataChannel.
 
-        Raises :class:`ConnectionError` if the channel is not open.
+        Raises :class:`ConnectionError` if the channel is not open or
+        if the send buffer is over the high-water mark — the sync
+        manager handles the latter by falling back to relay chunks.
         """
         if self._channel is None or self._closed:
             raise ConnectionError("DataChannel not open")
+        if self._channel.buffered_amount >= SEND_HWM_BYTES:
+            raise ConnectionError(
+                f"DataChannel backpressured "
+                f"(buffered={self._channel.buffered_amount}, "
+                f"hwm={SEND_HWM_BYTES})",
+            )
         await self._channel.send(chunk_payload)
 
     @property
@@ -311,7 +329,7 @@ class SyncRtcSession:
         if self._pc is not None:
             try:
                 self._pc.close()
-            except Exception:
+            except rtc.RTCError:
                 pass
         self._pc = None
         self._channel = None
