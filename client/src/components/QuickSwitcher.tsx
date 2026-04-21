@@ -1,8 +1,7 @@
 /**
  * QuickSwitcher — Cmd+K navigation (§23.69).
  */
-import { signal, effect } from '@preact/signals'
-import { api } from '@/api'
+import { signal } from '@preact/signals'
 
 const open = signal(false)
 const query = signal('')

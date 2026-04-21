@@ -3,7 +3,6 @@
  */
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
-import { api } from '@/api'
 import { PostCard } from './PostCard'
 import { Spinner } from './Spinner'
 import type { FeedPost } from '@/types'

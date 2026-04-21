@@ -2,7 +2,7 @@
  * TypingIndicator — show who is typing (§23.9).
  * Subscribes to WS 'typing' events and shows animated dots.
  */
-import { signal, effect } from '@preact/signals'
+import { signal } from '@preact/signals'
 import { ws } from '@/ws'
 
 const typingUsers = signal<Map<string, number>>(new Map())
@@ -30,7 +30,7 @@ export function sendTyping(conversationId: string) {
   ws.send('typing', { conversation_id: conversationId })
 }
 
-export function TypingIndicator({ scope }: { scope?: string }) {
+export function TypingIndicator({ scope: _scope }: { scope?: string }) {
   const users = Array.from(typingUsers.value.keys())
   if (users.length === 0) return null
   const label = users.length === 1 ? `${users[0]} is typing` :

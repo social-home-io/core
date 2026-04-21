@@ -2,7 +2,6 @@
  * LongPressMenu — context menu on mobile (§23.37).
  */
 import { signal } from '@preact/signals'
-import type { ComponentChildren } from 'preact'
 
 const menuItems = signal<{ label: string; action: () => void; danger?: boolean }[]>([])
 const menuPos = signal({ x: 0, y: 0 })

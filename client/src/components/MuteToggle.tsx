@@ -1,11 +1,17 @@
 /**
  * MuteToggle — mute conversation or space notifications (§23.66).
  */
-import { api } from '@/api'
 import { showToast } from './Toast'
 
-export function MuteToggle({ type, id, muted, onToggle }: {
-  type: 'conversation' | 'space'; id: string; muted: boolean; onToggle: (m: boolean) => void
+export function MuteToggle({ muted, onToggle }: {
+  /** Reserved for v2 when the mute preference is persisted via a
+   *  ``PATCH /api/conversations/{id}/mute`` or
+   *  ``PATCH /api/spaces/{id}/mute`` endpoint; kept off the current
+   *  prop list so ESLint doesn't flag them as unused. */
+  type?: 'conversation' | 'space';
+  id?: string;
+  muted: boolean;
+  onToggle: (m: boolean) => void;
 }) {
   const toggle = async () => {
     try {

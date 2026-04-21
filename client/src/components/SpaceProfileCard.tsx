@@ -1,7 +1,6 @@
 /**
  * SpaceProfileCard — public space preview (§23.110, §23.102).
  */
-import { Avatar } from './Avatar'
 import { Button } from './Button'
 import { JoinSpaceButton } from './SpaceJoinLeave'
 

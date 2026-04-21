@@ -48,7 +48,7 @@ export function AutoPairDialog({ onPaired }: Props) {
     'form' | 'pending' | 'paired' | 'queued' | 'failed'
   >('form')
   const [error, setError] = useState<string | null>(null)
-  const [token, setToken] = useState<string | null>(null)
+  const [, setToken] = useState<string | null>(null)
 
   useEffect(() => {
     if (peers.value.length === 1 && !viaPeer) {

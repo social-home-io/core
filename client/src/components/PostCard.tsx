@@ -3,7 +3,6 @@
  * Renders in household feed, space feeds, search results.
  */
 import { useState } from 'preact/hooks'
-import { api } from '@/api'
 import { Avatar } from './Avatar'
 import { BazaarPostBody } from './BazaarPostBody'
 import { FileRenderer, VideoRenderer, ImageRenderer } from './FileRenderer'

@@ -1,7 +1,7 @@
 /**
  * OfflineIndicator — show when browser is offline (§23.21).
  */
-import { signal, effect } from '@preact/signals'
+import { signal } from '@preact/signals'
 
 export const isOnline = signal(typeof navigator !== 'undefined' ? navigator.onLine : true)
 

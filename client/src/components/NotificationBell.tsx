@@ -1,7 +1,7 @@
 /**
  * NotificationBell — notification indicator + dropdown (§23.3).
  */
-import { signal, effect } from '@preact/signals'
+import { signal } from '@preact/signals'
 import { api } from '@/api'
 import type { Notification } from '@/types'
 

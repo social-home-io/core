@@ -3,8 +3,6 @@
  */
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
-import { api } from '@/api'
-import { Button } from './Button'
 import { openLightbox } from './ImageLightbox'
 import { Spinner } from './Spinner'
 

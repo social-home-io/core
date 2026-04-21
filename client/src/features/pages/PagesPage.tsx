@@ -24,7 +24,7 @@
  *   - "New page" opens {@link NewPageDialog}; empty-state surfaces a
  *     friendly CTA + Markdown syntax help card.
  */
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { ws } from '@/ws'

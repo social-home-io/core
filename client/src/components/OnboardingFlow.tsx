@@ -4,9 +4,7 @@
  */
 import { signal } from '@preact/signals'
 import { api } from '@/api'
-import { currentUser } from '@/store/auth'
 import { Button } from './Button'
-import { Avatar } from './Avatar'
 
 const step = signal(0)
 
