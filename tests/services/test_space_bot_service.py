@@ -181,9 +181,7 @@ async def test_non_admin_cannot_delete_others_member_bot(stack):
         icon="⏱️",
     )
     # Bob can delete his own.
-    await stack.svc.delete_bot(
-        "sp-1", bot_bob.bot_id, actor_username="bob"
-    )
+    await stack.svc.delete_bot("sp-1", bot_bob.bot_id, actor_username="bob")
     assert await stack.bot_repo.get(bot_bob.bot_id) is None
 
     # Owner Alice can delete a bot she didn't create.
@@ -195,9 +193,7 @@ async def test_non_admin_cannot_delete_others_member_bot(stack):
         name="Laundry",
         icon="🧺",
     )
-    await stack.svc.delete_bot(
-        "sp-1", bot_bob2.bot_id, actor_username="alice"
-    )
+    await stack.svc.delete_bot("sp-1", bot_bob2.bot_id, actor_username="alice")
     assert await stack.bot_repo.get(bot_bob2.bot_id) is None
 
 
@@ -249,7 +245,4 @@ async def test_bot_in_other_space_not_found(stack):
     )
     # Alice isn't a member of sp-nonexistent, so she's refused there.
     with pytest.raises(SpacePermissionError):
-        await stack.svc.get_bot(
-            "sp-nonexistent", "anything", actor_username="alice"
-        )
-
+        await stack.svc.get_bot("sp-nonexistent", "anything", actor_username="alice")

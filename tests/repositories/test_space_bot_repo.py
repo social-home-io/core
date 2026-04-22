@@ -12,7 +12,11 @@ from socialhome.domain.space import (
     SpaceFeatures,
     SpaceType,
 )
-from socialhome.domain.space_bot import BOT_TOKEN_PREFIX, BotScope, SpaceBotSlugTakenError
+from socialhome.domain.space_bot import (
+    BOT_TOKEN_PREFIX,
+    BotScope,
+    SpaceBotSlugTakenError,
+)
 from socialhome.repositories.space_bot_repo import (
     SqliteSpaceBotRepo,
     _hash_token,

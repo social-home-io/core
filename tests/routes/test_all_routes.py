@@ -751,9 +751,7 @@ async def _new_space_with_bots_enabled(client, h) -> str:
     )
     assert r.status == 201
     sid = (await r.json())["id"]
-    await client._db.enqueue(
-        "UPDATE spaces SET bot_enabled=1 WHERE id=?", (sid,)
-    )
+    await client._db.enqueue("UPDATE spaces SET bot_enabled=1 WHERE id=?", (sid,))
     return sid
 
 
@@ -787,9 +785,7 @@ async def test_space_bots_crud(client):
     assert len(await r.json()) == 1
 
     # Rotate → new token string returned
-    r = await client.post(
-        f"/api/spaces/{sid}/bots/{bot_id}/token", headers=h
-    )
+    r = await client.post(f"/api/spaces/{sid}/bots/{bot_id}/token", headers=h)
     assert r.status == 200
     rotated = (await r.json())["token"]
     assert rotated != bot_token
@@ -890,9 +886,7 @@ async def test_bot_bridge_honors_disable_switch(client):
         headers=h,
     )
     token = (await r.json())["token"]
-    await client._db.enqueue(
-        "UPDATE spaces SET bot_enabled=0 WHERE id=?", (sid,)
-    )
+    await client._db.enqueue("UPDATE spaces SET bot_enabled=0 WHERE id=?", (sid,))
     r = await client.post(
         f"/api/bot-bridge/spaces/{sid}",
         json={"title": None, "message": "hi"},

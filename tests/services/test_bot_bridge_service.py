@@ -88,9 +88,7 @@ async def stack(tmp_dir):
 
 async def test_notify_space_persists_post_with_bot_id(stack):
     """The stored post has SYSTEM_AUTHOR + bot_id set."""
-    post = await stack.svc.notify_space(
-        stack.bot, title="Ring", message="Front door"
-    )
+    post = await stack.svc.notify_space(stack.bot, title="Ring", message="Front door")
     assert post.author == SYSTEM_AUTHOR
     assert post.bot_id == "b1"
     # Round-trip through the repo to confirm bot_id persists.
@@ -107,9 +105,7 @@ async def test_notify_space_respects_kill_switch(stack):
 
     await stack.space_repo.save(copy.replace(space, bot_enabled=False))
     with pytest.raises(SpaceBotDisabledError):
-        await stack.svc.notify_space(
-            stack.bot, title=None, message="Blocked"
-        )
+        await stack.svc.notify_space(stack.bot, title=None, message="Blocked")
 
 
 async def test_payload_validation(stack):
