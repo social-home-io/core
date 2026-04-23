@@ -13,6 +13,7 @@ from ..services.calendar_import_service import (
     AICalendarImportError,
     AICalendarImportUnavailable,
 )
+from ..domain.calendar import CalendarVisibilityPref
 from .base import BaseView
 
 
@@ -63,6 +64,66 @@ class CalendarCollectionView(BaseView):
             color=body.get("color"),
         )
         return web.json_response(_cal_dict(cal), status=201)
+
+
+class CalendarVisibilityView(BaseView):
+    """``GET /api/me/calendar-visibility`` — fetch the caller's saved
+    visibility prefs (show/hide + ordering).
+
+    ``PUT /api/me/calendar-visibility`` — replace the caller's prefs
+    in full. Body: ``{"prefs": [{"calendar_ref": "...",
+    "calendar_type": "personal"|"space", "visible": bool,
+    "position": int}, ...]}``.
+
+    Prefs are opt-in — a calendar not listed here is shown at its
+    default position. Clients that want an explicit "hide" must post a
+    row with ``visible=false``.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(calendar_service_key)
+        prefs = await svc.list_visibility_prefs(ctx.username)
+        return web.json_response(
+            {
+                "prefs": [
+                    {
+                        "calendar_ref": p.calendar_ref,
+                        "calendar_type": p.calendar_type,
+                        "visible": p.visible,
+                        "position": p.position,
+                    }
+                    for p in prefs
+                ]
+            }
+        )
+
+    async def put(self) -> web.Response:
+        ctx = self.user
+        body = await self.body()
+        raw_prefs = body.get("prefs")
+        if not isinstance(raw_prefs, list):
+            return error_response(
+                422, "UNPROCESSABLE", "Body must include a 'prefs' array."
+            )
+        prefs: list[CalendarVisibilityPref] = []
+        for i, row in enumerate(raw_prefs):
+            if not isinstance(row, dict):
+                return error_response(
+                    422, "UNPROCESSABLE", f"prefs[{i}] must be an object."
+                )
+            prefs.append(
+                CalendarVisibilityPref(
+                    username=ctx.username,
+                    calendar_ref=str(row.get("calendar_ref") or ""),
+                    calendar_type=str(row.get("calendar_type") or ""),
+                    visible=bool(row.get("visible", True)),
+                    position=int(row.get("position", 0) or 0),
+                )
+            )
+        svc = self.svc(calendar_service_key)
+        await svc.set_visibility_prefs(ctx.username, prefs)
+        return web.Response(status=204)
 
 
 class CalendarEventsView(BaseView):

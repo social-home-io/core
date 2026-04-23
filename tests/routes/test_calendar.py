@@ -285,3 +285,100 @@ async def test_space_event_patch_missing_404(client):
         headers=_auth(client._tok),
     )
     assert r.status == 404
+
+
+# ─── Calendar visibility prefs ────────────────────────────────────────────
+
+
+async def test_get_calendar_visibility_empty(client):
+    """GET /api/me/calendar-visibility returns an empty list for a
+    user who hasn't toggled anything."""
+    r = await client.get("/api/me/calendar-visibility", headers=_auth(client._tok))
+    assert r.status == 200
+    assert (await r.json()) == {"prefs": []}
+
+
+async def test_put_and_get_calendar_visibility(client):
+    """PUT replaces prefs; GET returns them in position order."""
+    r = await client.put(
+        "/api/me/calendar-visibility",
+        json={
+            "prefs": [
+                {
+                    "calendar_ref": "cal-a",
+                    "calendar_type": "personal",
+                    "visible": True,
+                    "position": 0,
+                },
+                {
+                    "calendar_ref": "space-z",
+                    "calendar_type": "space",
+                    "visible": False,
+                    "position": 1,
+                },
+            ]
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 204
+    r2 = await client.get("/api/me/calendar-visibility", headers=_auth(client._tok))
+    payload = await r2.json()
+    assert len(payload["prefs"]) == 2
+    assert payload["prefs"][0]["calendar_ref"] == "cal-a"
+    assert payload["prefs"][1]["visible"] is False
+
+
+async def test_put_calendar_visibility_rejects_non_array(client):
+    r = await client.put(
+        "/api/me/calendar-visibility",
+        json={"prefs": "not-an-array"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+
+
+async def test_put_calendar_visibility_rejects_bad_type(client):
+    r = await client.put(
+        "/api/me/calendar-visibility",
+        json={
+            "prefs": [
+                {
+                    "calendar_ref": "c1",
+                    "calendar_type": "bogus",
+                }
+            ]
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+
+
+async def test_calendar_visibility_requires_auth(client):
+    r = await client.get("/api/me/calendar-visibility")
+    assert r.status == 401
+    r2 = await client.put(
+        "/api/me/calendar-visibility",
+        json={"prefs": []},
+    )
+    assert r2.status == 401
+
+
+async def test_put_empty_prefs_clears(client):
+    """PUT with an empty list removes prior saved prefs."""
+    await client.put(
+        "/api/me/calendar-visibility",
+        json={
+            "prefs": [
+                {"calendar_ref": "c1", "calendar_type": "personal"},
+            ]
+        },
+        headers=_auth(client._tok),
+    )
+    r = await client.put(
+        "/api/me/calendar-visibility",
+        json={"prefs": []},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 204
+    r2 = await client.get("/api/me/calendar-visibility", headers=_auth(client._tok))
+    assert (await r2.json()) == {"prefs": []}

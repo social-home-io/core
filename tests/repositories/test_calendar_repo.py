@@ -10,6 +10,7 @@ from socialhome.domain.calendar import (
     Calendar,
     CalendarEvent,
     CalendarRSVP,
+    CalendarVisibilityPref,
     RSVPStatus,
 )
 from socialhome.repositories.calendar_repo import (
@@ -385,3 +386,129 @@ async def test_space_cal_rsvp_remove(env):
     await env.space_cal_repo.remove_rsvp("sp-ev-rm", "uid-alice")
     rsvps = await env.space_cal_repo.list_rsvps("sp-ev-rm")
     assert rsvps == []
+
+
+# ── Visibility prefs ────────────────────────────────────────────────────────
+
+
+async def test_list_visibility_prefs_empty(env):
+    """A user with no prefs rows returns an empty list."""
+    assert await env.cal_repo.list_visibility_prefs("alice") == []
+
+
+async def test_set_and_list_visibility_prefs(env):
+    """set_visibility_prefs persists; list_visibility_prefs reads back
+    in ``position`` order."""
+    prefs = [
+        CalendarVisibilityPref(
+            username="alice",
+            calendar_ref="space-b",
+            calendar_type="space",
+            visible=True,
+            position=1,
+        ),
+        CalendarVisibilityPref(
+            username="alice",
+            calendar_ref="cal-1",
+            calendar_type="personal",
+            visible=True,
+            position=0,
+        ),
+        CalendarVisibilityPref(
+            username="alice",
+            calendar_ref="space-a",
+            calendar_type="space",
+            visible=False,
+            position=2,
+        ),
+    ]
+    await env.cal_repo.set_visibility_prefs("alice", prefs)
+    got = await env.cal_repo.list_visibility_prefs("alice")
+    # Ordered by position.
+    assert [p.calendar_ref for p in got] == ["cal-1", "space-b", "space-a"]
+    # visible flag round-trips.
+    assert got[2].visible is False
+    # calendar_type round-trips.
+    assert got[0].calendar_type == "personal"
+    assert got[1].calendar_type == "space"
+
+
+async def test_set_visibility_prefs_replaces_in_full(env):
+    """Re-posting a smaller list drops rows that were there before."""
+    await env.cal_repo.set_visibility_prefs(
+        "alice",
+        [
+            CalendarVisibilityPref(
+                username="alice",
+                calendar_ref="c1",
+                calendar_type="personal",
+            ),
+            CalendarVisibilityPref(
+                username="alice",
+                calendar_ref="c2",
+                calendar_type="personal",
+            ),
+        ],
+    )
+    await env.cal_repo.set_visibility_prefs(
+        "alice",
+        [
+            CalendarVisibilityPref(
+                username="alice",
+                calendar_ref="c1",
+                calendar_type="personal",
+            ),
+        ],
+    )
+    got = await env.cal_repo.list_visibility_prefs("alice")
+    assert [p.calendar_ref for p in got] == ["c1"]
+
+
+async def test_set_visibility_prefs_empty_clears(env):
+    """Posting an empty list removes all rows for the user."""
+    await env.cal_repo.set_visibility_prefs(
+        "alice",
+        [
+            CalendarVisibilityPref(
+                username="alice",
+                calendar_ref="c1",
+                calendar_type="personal",
+            ),
+        ],
+    )
+    await env.cal_repo.set_visibility_prefs("alice", [])
+    assert await env.cal_repo.list_visibility_prefs("alice") == []
+
+
+async def test_visibility_prefs_scoped_per_user(env):
+    """A second user's prefs are isolated from the first."""
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("bob", "uid-bob", "Bob"),
+    )
+    await env.cal_repo.set_visibility_prefs(
+        "alice",
+        [
+            CalendarVisibilityPref(
+                username="alice",
+                calendar_ref="c1",
+                calendar_type="personal",
+            ),
+        ],
+    )
+    await env.cal_repo.set_visibility_prefs(
+        "bob",
+        [
+            CalendarVisibilityPref(
+                username="bob",
+                calendar_ref="c2",
+                calendar_type="personal",
+            ),
+        ],
+    )
+    assert [
+        p.calendar_ref for p in await env.cal_repo.list_visibility_prefs("alice")
+    ] == ["c1"]
+    assert [
+        p.calendar_ref for p in await env.cal_repo.list_visibility_prefs("bob")
+    ] == ["c2"]

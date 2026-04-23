@@ -35,6 +35,7 @@ from .calendar import (
     CalendarImportIcsView,
     CalendarImportImageView,
     CalendarImportPromptView,
+    CalendarVisibilityView,
     SpaceCalendarEventDetailView,
     SpaceCalendarEventsView,
 )
@@ -461,6 +462,7 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
 
     # ── Calendar ────────────────────────────────────────────────────────
     app.router.add_view("/api/calendars", CalendarCollectionView)
+    app.router.add_view("/api/me/calendar-visibility", CalendarVisibilityView)
     app.router.add_view("/api/calendars/{id}/events", CalendarEventsView)
     app.router.add_view("/api/calendars/{id}/import_ics", CalendarImportIcsView)
     app.router.add_view("/api/calendars/{id}/import_image", CalendarImportImageView)

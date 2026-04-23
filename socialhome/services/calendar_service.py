@@ -15,7 +15,13 @@ import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from ..domain.calendar import Calendar, CalendarEvent, CalendarRSVP, RSVPStatus
+from ..domain.calendar import (
+    Calendar,
+    CalendarEvent,
+    CalendarRSVP,
+    CalendarVisibilityPref,
+    RSVPStatus,
+)
 from ..domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
@@ -82,6 +88,49 @@ class CalendarService:
         if result is None:
             raise KeyError(f"calendar {calendar_id!r} not found")
         await self._repo.delete_calendar(calendar_id)
+
+    # ── Visibility prefs ─────────────────────────────────────────────────
+
+    async def list_visibility_prefs(
+        self,
+        username: str,
+    ) -> list[CalendarVisibilityPref]:
+        """Return the user's saved show/hide + order preferences.
+
+        May be empty for a user who hasn't toggled anything — callers
+        should default "not in list" to "visible, default order".
+        """
+        return await self._repo.list_visibility_prefs(username)
+
+    async def set_visibility_prefs(
+        self,
+        username: str,
+        prefs: list[CalendarVisibilityPref],
+    ) -> None:
+        """Replace the user's visibility prefs with ``prefs`` verbatim.
+
+        Validation:
+
+        * ``calendar_type`` must be ``"personal"`` or ``"space"``.
+        * ``calendar_ref`` must be non-empty.
+        * ``position`` is coerced to a non-negative integer.
+        """
+        validated: list[CalendarVisibilityPref] = []
+        for p in prefs:
+            if p.calendar_type not in ("personal", "space"):
+                raise ValueError(f"invalid calendar_type: {p.calendar_type!r}")
+            if not p.calendar_ref:
+                raise ValueError("calendar_ref must not be empty")
+            validated.append(
+                CalendarVisibilityPref(
+                    username=username,
+                    calendar_ref=p.calendar_ref,
+                    calendar_type=p.calendar_type,
+                    visible=bool(p.visible),
+                    position=max(0, int(p.position)),
+                )
+            )
+        await self._repo.set_visibility_prefs(username, validated)
 
     # ── Events ────────────────────────────────────────────────────────────
 

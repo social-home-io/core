@@ -21,6 +21,7 @@ from ..domain.calendar import (
     Calendar,
     CalendarEvent,
     CalendarRSVP,
+    CalendarVisibilityPref,
     RSVPStatus,
 )
 from ..utils.rrule import expand_rrule
@@ -108,6 +109,16 @@ class AbstractCalendarRepo(Protocol):
         end: datetime,
     ) -> list[CalendarEvent]: ...
     async def delete_event(self, event_id: str) -> None: ...
+
+    async def list_visibility_prefs(
+        self,
+        username: str,
+    ) -> list[CalendarVisibilityPref]: ...
+    async def set_visibility_prefs(
+        self,
+        username: str,
+        prefs: list[CalendarVisibilityPref],
+    ) -> None: ...
 
 
 class SqliteCalendarRepo:
@@ -260,6 +271,62 @@ class SqliteCalendarRepo:
             "DELETE FROM calendar_events WHERE id=?",
             (event_id,),
         )
+
+    # ── Visibility prefs ───────────────────────────────────────────────
+    #
+    # A row exists only when the user has expressed a preference. Absent
+    # rows are treated as "visible, default order" at the service layer
+    # — the calendar picker folds saved prefs over the caller's actual
+    # calendar list, so a brand-new user sees everything without any
+    # rows having been written.
+
+    async def list_visibility_prefs(
+        self,
+        username: str,
+    ) -> list[CalendarVisibilityPref]:
+        rows = await self._db.fetchall(
+            "SELECT username, calendar_ref, calendar_type, visible, position"
+            " FROM calendar_visibility_prefs WHERE username=?"
+            " ORDER BY position, calendar_ref",
+            (username,),
+        )
+        return [
+            CalendarVisibilityPref(
+                username=r["username"],
+                calendar_ref=r["calendar_ref"],
+                calendar_type=r["calendar_type"],
+                visible=bool_col(r["visible"]),
+                position=int(r["position"]),
+            )
+            for r in rows_to_dicts(rows)
+        ]
+
+    async def set_visibility_prefs(
+        self,
+        username: str,
+        prefs: list[CalendarVisibilityPref],
+    ) -> None:
+        # Replace-in-full. The client sends the complete ordered list of
+        # calendars it's rendering; we trust that list as the source of
+        # truth. Two writes regardless of how many calendars the user
+        # has — matches the spec's OPT-2 pattern at §21.
+        await self._db.enqueue(
+            "DELETE FROM calendar_visibility_prefs WHERE username=?",
+            (username,),
+        )
+        for p in prefs:
+            await self._db.enqueue(
+                "INSERT INTO calendar_visibility_prefs"
+                "(username, calendar_ref, calendar_type, visible, position)"
+                " VALUES(?,?,?,?,?)",
+                (
+                    username,
+                    p.calendar_ref,
+                    p.calendar_type,
+                    int(p.visible),
+                    int(p.position),
+                ),
+            )
 
 
 # ─── Space calendars ──────────────────────────────────────────────────────

@@ -9,7 +9,12 @@ import pytest
 
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.calendar import CalendarEvent, CalendarRSVP, RSVPStatus
+from socialhome.domain.calendar import (
+    CalendarEvent,
+    CalendarRSVP,
+    CalendarVisibilityPref,
+    RSVPStatus,
+)
 from socialhome.repositories.calendar_repo import (
     SqliteCalendarRepo,
     SqliteSpaceCalendarRepo,
@@ -366,3 +371,111 @@ async def test_delete_event_publishes_calendar_event_deleted(env):
     )
     await svc.delete_event(event.id)
     assert any(isinstance(e, CalendarEventDeleted) for e in bus.events)
+
+
+# ── Visibility prefs ────────────────────────────────────────────────────────
+
+
+async def test_visibility_prefs_round_trip(env):
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("vera", "uid-vera", "Vera"),
+    )
+    prefs = [
+        CalendarVisibilityPref(
+            username="vera",
+            calendar_ref="cal-a",
+            calendar_type="personal",
+            visible=True,
+            position=0,
+        ),
+        CalendarVisibilityPref(
+            username="vera",
+            calendar_ref="space-z",
+            calendar_type="space",
+            visible=False,
+            position=1,
+        ),
+    ]
+    await env.cal_svc.set_visibility_prefs("vera", prefs)
+    got = await env.cal_svc.list_visibility_prefs("vera")
+    assert len(got) == 2
+    assert got[0].visible is True
+    assert got[1].visible is False
+
+
+async def test_visibility_prefs_rejects_bad_type(env):
+    with pytest.raises(ValueError):
+        await env.cal_svc.set_visibility_prefs(
+            "vera",
+            [
+                CalendarVisibilityPref(
+                    username="vera",
+                    calendar_ref="cal-a",
+                    calendar_type="household",  # invalid
+                ),
+            ],
+        )
+
+
+async def test_visibility_prefs_rejects_empty_ref(env):
+    with pytest.raises(ValueError):
+        await env.cal_svc.set_visibility_prefs(
+            "vera",
+            [
+                CalendarVisibilityPref(
+                    username="vera",
+                    calendar_ref="",
+                    calendar_type="personal",
+                ),
+            ],
+        )
+
+
+async def test_visibility_prefs_clamps_negative_position(env):
+    """Negative positions are coerced to 0 so the client can't
+    inject a sort anomaly."""
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("vi", "uid-vi", "Vi"),
+    )
+    await env.cal_svc.set_visibility_prefs(
+        "vi",
+        [
+            CalendarVisibilityPref(
+                username="vi",
+                calendar_ref="cal-neg",
+                calendar_type="personal",
+                position=-5,
+            ),
+        ],
+    )
+    got = await env.cal_svc.list_visibility_prefs("vi")
+    assert got[0].position == 0
+
+
+async def test_visibility_prefs_overrides_username(env):
+    """Client can't set prefs for a user other than the authenticated
+    one — the service stamps the authoritative username."""
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("real", "uid-real", "Real"),
+    )
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("fake", "uid-fake", "Fake"),
+    )
+    # Caller tries to write as 'fake' even though the service is called
+    # with username='real'.
+    await env.cal_svc.set_visibility_prefs(
+        "real",
+        [
+            CalendarVisibilityPref(
+                username="fake",
+                calendar_ref="c1",
+                calendar_type="personal",
+            ),
+        ],
+    )
+    assert await env.cal_svc.list_visibility_prefs("real")
+    assert await env.cal_svc.list_visibility_prefs("fake") == []

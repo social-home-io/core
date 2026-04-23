@@ -87,3 +87,21 @@ class CalendarRSVP:
     user_id: str
     status: str  # one of RSVPStatus.ALL
     updated_at: str  # ISO-8601
+
+
+@dataclass(slots=True, frozen=True)
+class CalendarVisibilityPref:
+    """One row in ``calendar_visibility_prefs`` — a user's show/hide +
+    ordering preference for a specific calendar in the picker.
+
+    Both personal and space calendars can be referenced; the type is
+    carried on the row so the client can render them distinctly. A
+    calendar the user has never expressed a preference for is treated
+    as visible — rows are only written when the user toggles something.
+    """
+
+    username: str
+    calendar_ref: str  # calendar id (personal) or space id (space)
+    calendar_type: str  # "personal" | "space"
+    visible: bool = True
+    position: int = 0

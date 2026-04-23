@@ -210,6 +210,8 @@ Same route shapes as the household feed, prefixed by `/api/spaces/{id}/`:
 | POST | `/api/calendars/{id}/import_ics` | Upload iCal. |
 | POST | `/api/calendars/{id}/{import_image\|import_prompt}` | AI-assisted import. |
 | GET | `/api/calendar/{id}/export.ics` | iCal export. |
+| GET | `/api/me/calendar-visibility` | Caller's saved show/hide + ordering prefs for the calendar picker. |
+| PUT | `/api/me/calendar-visibility` | Replace the caller's visibility prefs in full. Body: `{"prefs": [{"calendar_ref", "calendar_type": "personal"\|"space", "visible", "position"}, ...]}`. Returns 204. |
 | …same under `/api/spaces/{id}/calendar/...` | | Space-scoped variants. |
 
 ### Stickies, shopping, bazaar, gallery
