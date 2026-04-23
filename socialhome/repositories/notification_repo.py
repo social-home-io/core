@@ -61,6 +61,21 @@ class AbstractNotificationRepo(Protocol):
     async def count_unread(self, user_id: str) -> int: ...
     async def delete_old(self, older_than_days: int = 90) -> int: ...
 
+    # ── Per-space notification preferences ─────────────────────────────
+    async def get_space_notif_level(
+        self,
+        *,
+        user_id: str,
+        space_id: str,
+    ) -> str: ...
+    async def set_space_notif_level(
+        self,
+        *,
+        user_id: str,
+        space_id: str,
+        level: str,
+    ) -> None: ...
+
 
 class SqliteNotificationRepo:
     """SQLite-backed :class:`AbstractNotificationRepo`."""
@@ -207,6 +222,37 @@ class SqliteNotificationRepo:
             (cutoff,),
         )
         return int(count)
+
+    # ── Per-space notification preferences ─────────────────────────────
+
+    async def get_space_notif_level(
+        self,
+        *,
+        user_id: str,
+        space_id: str,
+    ) -> str:
+        row = await self._db.fetchone(
+            "SELECT level FROM space_notif_prefs WHERE user_id=? AND space_id=?",
+            (user_id, space_id),
+        )
+        return (row["level"] if row else "all") or "all"
+
+    async def set_space_notif_level(
+        self,
+        *,
+        user_id: str,
+        space_id: str,
+        level: str,
+    ) -> None:
+        await self._db.enqueue(
+            """
+            INSERT INTO space_notif_prefs(user_id, space_id, level)
+            VALUES(?, ?, ?)
+            ON CONFLICT(user_id, space_id) DO UPDATE SET
+                level=excluded.level
+            """,
+            (user_id, space_id, level),
+        )
 
 
 def _timedelta_days(days: int):

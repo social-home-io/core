@@ -11,6 +11,7 @@ from aiohttp.multipart import BodyPartReader
 
 from ..app_keys import (
     federation_repo_key,
+    notification_repo_key,
     presence_service_key,
     profile_picture_repo_key,
     space_bot_repo_key,
@@ -1223,3 +1224,137 @@ class MySubscriptionsView(BaseView):
         return web.json_response(
             {"subscriptions": await svc.list_subscriptions(ctx.user_id)},
         )
+
+
+# ─── Space sidebar links ────────────────────────────────────────────────
+
+
+class SpaceLinkCollectionView(BaseView):
+    """``GET /api/spaces/{id}/links`` — list configured links (members).
+
+    ``POST /api/spaces/{id}/links`` — create a new link (admin/owner).
+    Body: ``{label, url, position?}``.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        space_id = self.match("id")
+        svc = self.svc(space_service_key)
+        try:
+            links = await svc.list_links(space_id, actor_user_id=ctx.user_id)
+        except KeyError:
+            return error_response(404, "NOT_FOUND", "Space not found.")
+        return web.json_response({"links": links})
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        space_id = self.match("id")
+        body = await self.body()
+        svc = self.svc(space_service_key)
+        try:
+            link = await svc.upsert_link(
+                space_id=space_id,
+                actor_username=ctx.username,
+                link_id=None,
+                label=str(body.get("label") or ""),
+                url=str(body.get("url") or ""),
+                position=int(body.get("position", 0) or 0),
+            )
+        except ValueError as exc:
+            return error_response(422, "UNPROCESSABLE", str(exc))
+        return web.json_response(link, status=201)
+
+
+class SpaceLinkDetailView(BaseView):
+    """``PATCH /api/spaces/{id}/links/{link_id}`` — update an existing link.
+
+    ``DELETE /api/spaces/{id}/links/{link_id}`` — remove the link.
+    Both admin/owner-only.
+    """
+
+    async def patch(self) -> web.Response:
+        ctx = self.user
+        space_id = self.match("id")
+        link_id = self.match("link_id")
+        body = await self.body()
+        repo = self.svc(space_repo_key)
+        existing = await repo.get_link(link_id)
+        if existing is None or existing["space_id"] != space_id:
+            return error_response(404, "NOT_FOUND", "Link not found.")
+        svc = self.svc(space_service_key)
+        try:
+            link = await svc.upsert_link(
+                space_id=space_id,
+                actor_username=ctx.username,
+                link_id=link_id,
+                label=str(body.get("label") or existing["label"]),
+                url=str(body.get("url") or existing["url"]),
+                position=int(
+                    body.get("position", existing["position"]) or 0,
+                ),
+            )
+        except ValueError as exc:
+            return error_response(422, "UNPROCESSABLE", str(exc))
+        return web.json_response(link)
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        space_id = self.match("id")
+        link_id = self.match("link_id")
+        repo = self.svc(space_repo_key)
+        existing = await repo.get_link(link_id)
+        if existing is None or existing["space_id"] != space_id:
+            return error_response(404, "NOT_FOUND", "Link not found.")
+        svc = self.svc(space_service_key)
+        await svc.delete_link(link_id=link_id, actor_username=ctx.username)
+        return web.json_response({"ok": True}, status=200)
+
+
+# ─── Per-space notification preferences ─────────────────────────────────
+
+
+_NOTIF_LEVELS = frozenset({"all", "mentions", "muted"})
+
+
+class SpaceNotifPrefsView(BaseView):
+    """``GET /api/spaces/{id}/notif-prefs`` — caller's level for this space.
+
+    ``PUT /api/spaces/{id}/notif-prefs`` — set level.
+    Body: ``{level: 'all' | 'mentions' | 'muted'}``.
+    Returns ``{level}``.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        space_id = self.match("id")
+        space_repo = self.svc(space_repo_key)
+        if await space_repo.get_member(space_id, ctx.user_id) is None:
+            return error_response(403, "FORBIDDEN", "Not a space member.")
+        notif_repo = self.svc(notification_repo_key)
+        level = await notif_repo.get_space_notif_level(
+            user_id=ctx.user_id,
+            space_id=space_id,
+        )
+        return web.json_response({"level": level})
+
+    async def put(self) -> web.Response:
+        ctx = self.user
+        space_id = self.match("id")
+        space_repo = self.svc(space_repo_key)
+        if await space_repo.get_member(space_id, ctx.user_id) is None:
+            return error_response(403, "FORBIDDEN", "Not a space member.")
+        body = await self.body()
+        level = str(body.get("level") or "").strip().lower()
+        if level not in _NOTIF_LEVELS:
+            return error_response(
+                422,
+                "UNPROCESSABLE",
+                "level must be one of 'all','mentions','muted'.",
+            )
+        notif_repo = self.svc(notification_repo_key)
+        await notif_repo.set_space_notif_level(
+            user_id=ctx.user_id,
+            space_id=space_id,
+            level=level,
+        )
+        return web.json_response({"level": level})

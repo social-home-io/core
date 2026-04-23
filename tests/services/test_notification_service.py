@@ -171,6 +171,95 @@ async def test_space_post_notifies_members(stack):
     assert any("posted in S" in n.title for n in bob_n)
 
 
+async def test_space_post_respects_muted_notif_pref(stack):
+    """Members with level='muted' receive no space-post notification."""
+    from socialhome.repositories.space_repo import SqliteSpaceRepo
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+    from socialhome.services.space_service import SpaceService
+
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    space_repo = SqliteSpaceRepo(stack.db)
+    spost_repo = SqliteSpacePostRepo(stack.db)
+    space_svc = SpaceService(
+        space_repo,
+        spost_repo,
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="Quiet")
+    await space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
+    await stack.notif_repo.set_space_notif_level(
+        user_id=b.user_id,
+        space_id=space.id,
+        level="muted",
+    )
+    await space_svc.create_post(
+        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="shhh"
+    )
+    bob_n = await stack.notif_repo.list(b.user_id, limit=50)
+    assert not any("posted in Quiet" in n.title for n in bob_n)
+
+
+async def test_space_post_mentions_only_skips_non_mention(stack):
+    """level='mentions' — drops non-mention posts, keeps mentions."""
+    from socialhome.domain.events import SpacePostCreated
+    from socialhome.domain.mention import Mention, MentionType
+    from socialhome.domain.post import Post
+    from socialhome.repositories.space_repo import SqliteSpaceRepo
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+    from socialhome.services.space_service import SpaceService
+
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    space_repo = SqliteSpaceRepo(stack.db)
+    spost_repo = SqliteSpacePostRepo(stack.db)
+    space_svc = SpaceService(
+        space_repo,
+        spost_repo,
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="M")
+    await space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
+    await stack.notif_repo.set_space_notif_level(
+        user_id=b.user_id,
+        space_id=space.id,
+        level="mentions",
+    )
+    # Plain post — should NOT notify bob.
+    await space_svc.create_post(
+        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="hi all"
+    )
+    bob_n = await stack.notif_repo.list(b.user_id, limit=50)
+    assert not any(n.type == "space_post_created" for n in bob_n)
+    # Post with bob mention — publish event directly with mentions=...
+    post = Post(
+        id="p-mention",
+        author=a.user_id,
+        type=PostType.TEXT,
+        content="@bob!",
+        created_at=datetime.now(timezone.utc),
+    )
+    await stack.bus.publish(
+        SpacePostCreated(
+            post=post,
+            space_id=space.id,
+            mentions=(
+                Mention(
+                    type=MentionType.USER,
+                    raw="@bob",
+                    user_id=b.user_id,
+                ),
+            ),
+        )
+    )
+    bob_n = await stack.notif_repo.list(b.user_id, limit=50)
+    assert any(n.type == "space_post_created" for n in bob_n)
+
+
 async def test_moderation_queued_notifies_admins(stack):
     """SpaceModerationQueued notifies space admins."""
     from socialhome.repositories.space_repo import SqliteSpaceRepo

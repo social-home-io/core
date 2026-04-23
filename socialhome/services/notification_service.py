@@ -482,6 +482,10 @@ class NotificationService:
     async def on_space_post_created(self, event: SpacePostCreated) -> None:
         """Notify space members (except the author). Space name is included
         in the title for context. Body is omitted per §25.3.
+
+        Honours per-member :table:`space_notif_prefs`: ``muted`` skips the
+        member entirely, ``mentions`` only fires if the member's user_id
+        is in ``event.mentions``.
         """
         space = await self._spaces.get(event.space_id)
         if space is None:
@@ -489,9 +493,18 @@ class NotificationService:
         author_id = event.post.author
         author = await self._users.get_by_user_id(author_id)
         name = author.display_name if author else "Someone"
+        mentioned = {m.user_id for m in event.mentions if m.user_id}
         members = await self._spaces.list_members(event.space_id)
         for member in members:
             if member.user_id == author_id:
+                continue
+            level = await self._notifs.get_space_notif_level(
+                user_id=member.user_id,
+                space_id=event.space_id,
+            )
+            if level == "muted":
+                continue
+            if level == "mentions" and member.user_id not in mentioned:
                 continue
             recipient = await self._users.get_by_user_id(member.user_id)
             await self._save_notif(
