@@ -1177,3 +1177,43 @@ class SpacePostCommentDetailView(BaseView):
             actor_user_id=ctx.user_id,
         )
         return web.Response(status=204)
+
+
+class SpaceFollowView(BaseView):
+    """``POST /api/spaces/{id}/follow`` — follow a public space
+    (idempotent — double-follow is a no-op).
+
+    ``DELETE /api/spaces/{id}/follow`` — unfollow. Both return
+    ``{"following": bool}``.
+    """
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        space_id = self.match("id")
+        svc = self.svc(space_service_key)
+        await svc.follow_space(ctx.user_id, space_id)
+        return web.json_response({"following": True})
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        space_id = self.match("id")
+        svc = self.svc(space_service_key)
+        await svc.unfollow_space(ctx.user_id, space_id)
+        return web.json_response({"following": False})
+
+
+class MyFollowsView(BaseView):
+    """``GET /api/me/follows`` — the caller's followed-spaces list.
+
+    Returns ``{"follows": [{space_id, followed_at}, ...]}`` ordered
+    newest first. Followed spaces aren't necessarily mirrored on this
+    HFS — the client hydrates metadata (name / cover) from its own
+    public-space cache.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(space_service_key)
+        return web.json_response(
+            {"follows": await svc.list_follows(ctx.user_id)},
+        )

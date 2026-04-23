@@ -104,6 +104,7 @@ class SpaceService:
         "_federation_repo",
         "_federation",
         "_remote_members",
+        "_follows",
     )
 
     def __init__(
@@ -127,6 +128,7 @@ class SpaceService:
         self._federation_repo = None
         self._federation = None
         self._remote_members = None
+        self._follows = None
 
     def attach_child_protection(self, child_protection_service) -> None:
         """Wire §CP.F1 enforcement into add_member."""
@@ -139,6 +141,14 @@ class SpaceService:
     def attach_cover_repo(self, repo) -> None:
         """Wire the space-cover blob store (§23 customization)."""
         self._covers = repo
+
+    def attach_follow_repo(self, repo) -> None:
+        """Wire :class:`AbstractFollowRepo` so ``follow_space`` /
+        ``unfollow_space`` / ``list_follows`` are available. Optional —
+        when unset the endpoints return 503 so the UI can degrade
+        gracefully in minimal deployments.
+        """
+        self._follows = repo
 
     def attach_gfs_connection_service(self, gfs_service) -> None:
         """Wire outbound GFS publish so ``space_type=global`` spaces
@@ -1704,6 +1714,34 @@ class SpaceService:
     ) -> None:
         await self._require_space(space_id)
         await self._spaces.set_space_alias(space_id, username, alias)
+
+    # ── Follows (public-space bookmarks) ───────────────────────────────
+    #
+    # Follows are user-local pointers to public spaces. Unlike membership,
+    # following is a one-sided bookmark — the space's host HFS doesn't
+    # need to be notified. ``space_id`` is accepted even when the space
+    # isn't locally mirrored (e.g. discovered via GFS but never joined);
+    # the caller passes the id it received from the discovery payload.
+
+    async def follow_space(self, user_id: str, space_id: str) -> None:
+        if self._follows is None:
+            raise RuntimeError("follow repo not attached")
+        await self._follows.follow(user_id, space_id)
+
+    async def unfollow_space(self, user_id: str, space_id: str) -> None:
+        if self._follows is None:
+            raise RuntimeError("follow repo not attached")
+        await self._follows.unfollow(user_id, space_id)
+
+    async def list_follows(self, user_id: str) -> list[dict]:
+        if self._follows is None:
+            return []
+        return await self._follows.list_follows(user_id)
+
+    async def is_following(self, user_id: str, space_id: str) -> bool:
+        if self._follows is None:
+            return False
+        return await self._follows.is_following(user_id, space_id)
 
     # ── Internal helpers ───────────────────────────────────────────────
 

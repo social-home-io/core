@@ -820,3 +820,78 @@ async def test_space_cover_non_admin_forbidden(client):
         headers=_auth(client._bob_token),
     )
     assert r2.status == 403
+
+
+# ── Follow spaces ─────────────────────────────────────────────────────────
+
+
+async def test_follow_and_unfollow_space(client):
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Public"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+
+    r = await client.post(
+        f"/api/spaces/{sid}/follow",
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200
+    assert (await r.json())["following"] is True
+
+    r = await client.get("/api/me/follows", headers=_auth(client._bob_token))
+    assert r.status == 200
+    body = await r.json()
+    assert [row["space_id"] for row in body["follows"]] == [sid]
+
+    r = await client.delete(
+        f"/api/spaces/{sid}/follow",
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200
+    assert (await r.json())["following"] is False
+
+    r = await client.get("/api/me/follows", headers=_auth(client._bob_token))
+    assert (await r.json())["follows"] == []
+
+
+async def test_follow_is_idempotent(client):
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Public"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    for _ in range(3):
+        r = await client.post(
+            f"/api/spaces/{sid}/follow",
+            headers=_auth(client._bob_token),
+        )
+        assert r.status == 200
+    follows = await (
+        await client.get("/api/me/follows", headers=_auth(client._bob_token))
+    ).json()
+    assert len(follows["follows"]) == 1
+
+
+async def test_follows_scoped_per_user(client):
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Public"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    await client.post(
+        f"/api/spaces/{sid}/follow",
+        headers=_auth(client._bob_token),
+    )
+    r = await client.get("/api/me/follows", headers=_auth(client._admin_token))
+    assert (await r.json())["follows"] == []
+
+
+async def test_follow_requires_auth(client):
+    r = await client.post("/api/spaces/any/follow")
+    assert r.status == 401
+    r2 = await client.get("/api/me/follows")
+    assert r2.status == 401

@@ -87,6 +87,9 @@ Admins also have:
 | PATCH / DELETE | `/api/feed/posts/{id}/comments/{cid}` | Edit / delete own comment. |
 | POST | `/api/feed/posts/{id}/save` | Bookmark. |
 | GET | `/api/feed/saved` | List bookmarks. |
+| GET | `/api/me/feed/read` | Caller's scroll-restoration watermark. Returns `{last_read_post_id, last_read_at}`. |
+| POST | `/api/me/feed/read` | Mark a post read. Body: `{"post_id": "..."}` (or `null` to clear). 404 on unknown post id. |
+| GET | `/api/me/follows` | Caller's followed public spaces — `{follows: [{space_id, followed_at}, ...]}`, newest first. |
 
 ## HFS — Spaces
 
@@ -105,6 +108,7 @@ events these routes fire.
 | GET | `/api/admin/spaces` | Admin-only: list all spaces on this HFS. |
 | GET | `/api/spaces/{id}/feed` | Space feed summary. |
 | POST | `/api/spaces/{id}/sync` | Trigger a re-sync with the space hosts. |
+| POST / DELETE | `/api/spaces/{id}/follow` | Follow / unfollow a public space (idempotent). Returns `{following}`. |
 
 **Members**
 

@@ -914,3 +914,36 @@ async def test_space_comment_image_no_media(stack):
         await stack.space_svc.add_comment(
             p.id, author_user_id=anna.user_id, comment_type="image"
         )
+
+
+# ── Follow-spaces ──────────────────────────────────────────────────────────
+
+
+async def test_follow_without_attached_repo_raises(stack):
+    """Calling ``follow_space`` without an attached repo raises —
+    defensive: the API surfaces a clear error rather than a silent no-op.
+    """
+    u = await stack.provision_user("fan")
+    with pytest.raises(RuntimeError, match="follow repo not attached"):
+        await stack.space_svc.follow_space(u.user_id, "sp")
+
+
+async def test_list_follows_without_repo_returns_empty(stack):
+    """Read path degrades to empty list when no repo — lets callers
+    still render a UI in minimal deployments."""
+    u = await stack.provision_user("fan")
+    assert await stack.space_svc.list_follows(u.user_id) == []
+    assert await stack.space_svc.is_following(u.user_id, "sp") is False
+
+
+async def test_follow_round_trip_with_attached_repo(stack):
+    from socialhome.repositories.follow_repo import SqliteFollowRepo
+
+    stack.space_svc.attach_follow_repo(SqliteFollowRepo(stack.db))
+    u = await stack.provision_user("fan")
+    await stack.space_svc.follow_space(u.user_id, "sp-a")
+    assert await stack.space_svc.is_following(u.user_id, "sp-a") is True
+    follows = await stack.space_svc.list_follows(u.user_id)
+    assert [r["space_id"] for r in follows] == ["sp-a"]
+    await stack.space_svc.unfollow_space(u.user_id, "sp-a")
+    assert await stack.space_svc.is_following(u.user_id, "sp-a") is False
