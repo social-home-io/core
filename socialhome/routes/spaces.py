@@ -1177,3 +1177,49 @@ class SpacePostCommentDetailView(BaseView):
             actor_user_id=ctx.user_id,
         )
         return web.Response(status=204)
+
+
+class SpaceSubscribeView(BaseView):
+    """``POST /api/spaces/{id}/subscribe`` — subscribe to a public or
+    global space as a read-only member (idempotent — double-subscribe
+    is a no-op).
+
+    ``DELETE /api/spaces/{id}/subscribe`` — unsubscribe. No-op for
+    users who aren't subscribers (so this can't silently leave a real
+    member's space). Both return ``{"subscribed": bool}``.
+
+    Note on naming: "subscribe" is used here rather than "follow"
+    because the product already uses "follow" for a different concept
+    (the dashboard pin list, see ``corner_service``).
+    """
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        space_id = self.match("id")
+        svc = self.svc(space_service_key)
+        await svc.subscribe_to_space(ctx.user_id, space_id)
+        return web.json_response({"subscribed": True})
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        space_id = self.match("id")
+        svc = self.svc(space_service_key)
+        await svc.unsubscribe_from_space(ctx.user_id, space_id)
+        return web.json_response({"subscribed": False})
+
+
+class MySubscriptionsView(BaseView):
+    """``GET /api/me/subscriptions`` — the caller's read-only-member
+    subscriptions.
+
+    Returns ``{"subscriptions": [{space_id, subscribed_at}, ...]}``
+    ordered newest first. The client hydrates metadata (name / cover)
+    from its own public-space cache.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(space_service_key)
+        return web.json_response(
+            {"subscriptions": await svc.list_subscriptions(ctx.user_id)},
+        )

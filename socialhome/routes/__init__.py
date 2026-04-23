@@ -75,6 +75,7 @@ from .conversations import (
 from .federation import FederationWebhookView
 from .feed import (
     FeedCollectionView,
+    FeedReadWatermarkView,
     PostCollectionView,
     PostCommentDetailView,
     PostCommentView,
@@ -180,12 +181,14 @@ from .space_bots import (
 )
 from .spaces import (
     AdminSpaceCollectionView,
+    MySubscriptionsView,
     SpaceBanListView,
     SpaceBanView,
     SpaceCollectionView,
     SpaceDetailView,
     SpaceCoverView,
     SpaceFeedView,
+    SpaceSubscribeView,
     RemoteInviteCollectionView,
     RemoteInviteDecisionView,
     SpaceInviteTokenView,
@@ -301,6 +304,7 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     )
     app.router.add_view("/api/feed/posts/{id}/save", PostSaveView)
     app.router.add_view("/api/feed/saved", SavedPostsView)
+    app.router.add_view("/api/me/feed/read", FeedReadWatermarkView)
 
     # ── Spaces ──────────────────────────────────────────────────────────
     app.router.add_view("/api/admin/spaces", AdminSpaceCollectionView)
@@ -342,6 +346,8 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/spaces/{id}/cover", SpaceCoverView)
     app.router.add_view("/api/spaces/{id}/posts", SpacePostCollectionView)
     app.router.add_view("/api/spaces/{id}/sync", SpaceSyncTriggerView)
+    app.router.add_view("/api/spaces/{id}/subscribe", SpaceSubscribeView)
+    app.router.add_view("/api/me/subscriptions", MySubscriptionsView)
     # Bot personas (named bots that post into a space via the bot-bridge).
     app.router.add_view("/api/spaces/{id}/bots", SpaceBotCollectionView)
     app.router.add_view("/api/spaces/{id}/bots/{bot_id}", SpaceBotDetailView)
