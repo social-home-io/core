@@ -208,6 +208,20 @@ class AbstractSpaceRepo(Protocol):
         local_username: str,
     ) -> str | None: ...
 
+    # ── Sidebar links (admin-configurable quick-links) ─────────────────
+    async def list_links(self, space_id: str) -> list[dict]: ...
+    async def upsert_link(
+        self,
+        *,
+        link_id: str,
+        space_id: str,
+        label: str,
+        url: str,
+        position: int,
+    ) -> None: ...
+    async def delete_link(self, link_id: str) -> None: ...
+    async def get_link(self, link_id: str) -> dict | None: ...
+
 
 # ─── Concrete SQLite implementation ───────────────────────────────────────
 
@@ -1052,6 +1066,66 @@ class SqliteSpaceRepo:
             (space_id, local_username),
         )
         return row["alias"] if row else None
+
+    # ── Sidebar links ──────────────────────────────────────────────────
+
+    async def list_links(self, space_id: str) -> list[dict]:
+        rows = await self._db.fetchall(
+            "SELECT id, label, url, position FROM space_links "
+            "WHERE space_id=? ORDER BY position, label",
+            (space_id,),
+        )
+        return [
+            {
+                "id": r["id"],
+                "label": r["label"],
+                "url": r["url"],
+                "position": int(r["position"] or 0),
+            }
+            for r in rows
+        ]
+
+    async def upsert_link(
+        self,
+        *,
+        link_id: str,
+        space_id: str,
+        label: str,
+        url: str,
+        position: int,
+    ) -> None:
+        await self._db.enqueue(
+            """
+            INSERT INTO space_links(id, space_id, label, url, position)
+            VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                label=excluded.label,
+                url=excluded.url,
+                position=excluded.position
+            """,
+            (link_id, space_id, label, url, position),
+        )
+
+    async def delete_link(self, link_id: str) -> None:
+        await self._db.enqueue(
+            "DELETE FROM space_links WHERE id=?",
+            (link_id,),
+        )
+
+    async def get_link(self, link_id: str) -> dict | None:
+        row = await self._db.fetchone(
+            "SELECT id, space_id, label, url, position FROM space_links WHERE id=?",
+            (link_id,),
+        )
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "space_id": row["space_id"],
+            "label": row["label"],
+            "url": row["url"],
+            "position": int(row["position"] or 0),
+        }
 
 
 # ─── Row → domain mapping ─────────────────────────────────────────────────

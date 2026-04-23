@@ -90,3 +90,49 @@ async def test_notification_delete_old(env):
     )
     purged = await env.notif_repo.delete_old(older_than_days=30)
     assert purged >= 1
+
+
+# ── Per-space notification preferences ─────────────────────────────────────
+
+
+async def test_get_space_notif_level_default_is_all(env):
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("u1", "uid-u1", "U1"),
+    )
+    await env.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?,?,?,?,?)",
+        ("sp-n", "N", "iid", "u1", "aabb" * 16),
+    )
+    level = await env.notif_repo.get_space_notif_level(
+        user_id="uid-u1", space_id="sp-n"
+    )
+    assert level == "all"
+
+
+async def test_set_and_get_space_notif_level(env):
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("u2", "uid-u2", "U2"),
+    )
+    await env.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?,?,?,?,?)",
+        ("sp-n2", "N2", "iid", "u2", "aabb" * 16),
+    )
+    await env.notif_repo.set_space_notif_level(
+        user_id="uid-u2", space_id="sp-n2", level="muted"
+    )
+    assert (
+        await env.notif_repo.get_space_notif_level(user_id="uid-u2", space_id="sp-n2")
+        == "muted"
+    )
+    # Upsert flips to mentions.
+    await env.notif_repo.set_space_notif_level(
+        user_id="uid-u2", space_id="sp-n2", level="mentions"
+    )
+    assert (
+        await env.notif_repo.get_space_notif_level(user_id="uid-u2", space_id="sp-n2")
+        == "mentions"
+    )

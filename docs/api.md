@@ -142,6 +142,14 @@ events these routes fire.
 | GET / POST / DELETE | `/api/spaces/{id}/cover` | Space cover image. |
 | GET / PATCH | `/api/spaces/{id}/theme` | Space-level theme. |
 
+**Customisation**
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET / POST | `/api/spaces/{id}/links` | List / create admin-configured sidebar quick-links. Members see; admin/owner writes. Body: `{label, url, position?}`. |
+| PATCH / DELETE | `/api/spaces/{id}/links/{link_id}` | Update or remove a link. Admin/owner. |
+| GET / PUT | `/api/spaces/{id}/notif-prefs` | Caller's per-space notification level. Body: `{level}` where level ∈ `"all"` \| `"mentions"` \| `"muted"`. Muted suppresses `space_post_created` notifications; `mentions` only fires when the caller appears in the post's `mentions`. |
+
 **Bot personas (bot-bridge)**
 
 Named bots that post into a space via the bot-bridge. Each bot has its

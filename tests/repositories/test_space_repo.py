@@ -315,3 +315,79 @@ async def test_get_missing_alias_returns_none(env):
     await env.repo.save(_space("sp-noalias"))
     alias = await env.repo.get_space_alias("sp-noalias", "alice")
     assert alias is None
+
+
+# ── Sidebar links ──────────────────────────────────────────────────────────
+
+
+async def test_upsert_and_list_links(env):
+    await env.repo.save(_space("sp-links"))
+    await env.repo.upsert_link(
+        link_id="l1",
+        space_id="sp-links",
+        label="Wiki",
+        url="https://wiki",
+        position=0,
+    )
+    await env.repo.upsert_link(
+        link_id="l2",
+        space_id="sp-links",
+        label="Chat",
+        url="https://chat",
+        position=1,
+    )
+    links = await env.repo.list_links("sp-links")
+    assert [link["id"] for link in links] == ["l1", "l2"]
+    assert links[0]["label"] == "Wiki"
+    assert links[1]["url"] == "https://chat"
+
+
+async def test_upsert_link_updates_existing(env):
+    await env.repo.save(_space("sp-up"))
+    await env.repo.upsert_link(
+        link_id="l1",
+        space_id="sp-up",
+        label="Wiki",
+        url="https://old",
+        position=0,
+    )
+    await env.repo.upsert_link(
+        link_id="l1",
+        space_id="sp-up",
+        label="Wiki v2",
+        url="https://new",
+        position=3,
+    )
+    links = await env.repo.list_links("sp-up")
+    assert len(links) == 1
+    assert links[0]["label"] == "Wiki v2"
+    assert links[0]["url"] == "https://new"
+    assert links[0]["position"] == 3
+
+
+async def test_delete_link(env):
+    await env.repo.save(_space("sp-del"))
+    await env.repo.upsert_link(
+        link_id="l1",
+        space_id="sp-del",
+        label="Wiki",
+        url="https://wiki",
+        position=0,
+    )
+    await env.repo.delete_link("l1")
+    assert await env.repo.list_links("sp-del") == []
+
+
+async def test_get_link(env):
+    await env.repo.save(_space("sp-get"))
+    await env.repo.upsert_link(
+        link_id="l1",
+        space_id="sp-get",
+        label="Wiki",
+        url="https://wiki",
+        position=0,
+    )
+    link = await env.repo.get_link("l1")
+    assert link is not None
+    assert link["space_id"] == "sp-get"
+    assert await env.repo.get_link("missing") is None

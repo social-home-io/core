@@ -1812,6 +1812,58 @@ class SpaceService:
         member = await self._spaces.get_member(space_id, user_id)
         return member is not None and member.role == "subscriber"
 
+    # ── Sidebar links (§23 — admin-configurable quick-links) ───────────
+
+    async def list_links(self, space_id: str, *, actor_user_id: str) -> list[dict]:
+        await self._require_member(space_id, actor_user_id)
+        return await self._spaces.list_links(space_id)
+
+    async def upsert_link(
+        self,
+        *,
+        space_id: str,
+        actor_username: str,
+        link_id: str | None,
+        label: str,
+        url: str,
+        position: int,
+    ) -> dict:
+        space = await self._require_space(space_id)
+        await self._require_admin_or_owner(space, actor_username)
+        label = label.strip()
+        url = url.strip()
+        if not label:
+            raise ValueError("label must not be empty")
+        if not url:
+            raise ValueError("url must not be empty")
+        link_id = link_id or uuid.uuid4().hex
+        await self._spaces.upsert_link(
+            link_id=link_id,
+            space_id=space_id,
+            label=label,
+            url=url,
+            position=int(position),
+        )
+        return {
+            "id": link_id,
+            "label": label,
+            "url": url,
+            "position": int(position),
+        }
+
+    async def delete_link(
+        self,
+        *,
+        link_id: str,
+        actor_username: str,
+    ) -> None:
+        link = await self._spaces.get_link(link_id)
+        if link is None:
+            raise KeyError(f"link {link_id!r} not found")
+        space = await self._require_space(link["space_id"])
+        await self._require_admin_or_owner(space, actor_username)
+        await self._spaces.delete_link(link_id)
+
     # ── Internal helpers ───────────────────────────────────────────────
 
     async def _require_space(self, space_id: str) -> Space:
