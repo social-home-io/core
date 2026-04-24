@@ -68,6 +68,37 @@ Both are stored alongside the peer in `remote_instances` with a
 `PairingStatus.CONFIRMED` row. See `docs/crypto.md` for the full key
 schedule.
 
+## URL rotation — `URL_UPDATED`
+
+When this instance's externally-reachable inbox URL changes — admin
+rotates `external_url` in standalone mode, Nabu Casa Remote UI flips
+on/off in HA mode, or a reverse-proxy gets reconfigured — every
+confirmed peer is told so their `remote_inbox_url` tracks the move.
+Without this, the next envelope delivery silently fails with a
+"No instance found" rejection at the stale URL.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as HFS A<br/>(URL changed)
+    participant B as HFS B<br/>(peer)
+    A->>A: detect base URL change<br/>(adapter.get_federation_base)
+    loop for each confirmed peer
+        A->>B: URL_UPDATED<br/>(inbox_url = new_base/peer.local_inbox_id)
+        B->>B: update remote_instances.remote_inbox_url<br/>for A
+    end
+```
+
+Payload: `{"inbox_url": "<full per-peer URL>"}`. The URL is
+per-peer: sender appends the recipient's `local_inbox_id` to the new
+base, so each `URL_UPDATED` envelope delivers to exactly one peer
+with that peer's own secret path.
+
+Validation at the receiver: the envelope is already signature-verified
+by the §24.11 inbound pipeline. The handler additionally rejects
+empty URLs and unsupported schemes (anything that isn't `http://` or
+`https://`).
+
 ## Unpairing
 
 `UNPAIR` is a polite notice that the session keys are about to be
@@ -81,12 +112,15 @@ the receiver still decrypts with a key it's about to delete.
   direct + auto-pair flows.
 - `socialhome/services/federation_inbound/pairing.py` — inbound
   handlers (one per event type, registered with the dispatch registry).
-- `socialhome/routes/pairing_routes.py` — REST endpoints used by the
-  UI (`/api/pairing/*`).
+  Includes the `URL_UPDATED` handler.
+- `socialhome/services/url_update_outbound.py` — outbound fan-out of
+  `URL_UPDATED` when this instance's base URL changes.
+- `socialhome/routes/pairing.py` — REST endpoints used by the UI
+  (`/api/pairing/*`).
 - `socialhome/crypto.py` — key derivation primitives.
 
 ## Spec references
 
-§11 (Instance Pairing & Encrypted Inboxs),
+§11 (Instance Pairing & Encrypted Inboxes),
 §25.8.20 (session key derivation),
 §S-13/S-14 (SAS verification and answer-origin audits).
