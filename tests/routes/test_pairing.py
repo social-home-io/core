@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 from socialhome.app_keys import federation_repo_key
+from socialhome.config import Config
 from socialhome.domain.federation import (
     InstanceSource,
     PairingStatus,
@@ -28,32 +29,77 @@ def _fake_instance(iid: str = "peer-1") -> RemoteInstance:
 
 
 async def test_initiate_pairing_returns_qr_payload(client):
-    r = await client.post(
-        "/api/pairing/initiate",
-        json={"inbox_url": "https://example/wh"},
-        headers=_auth(client._tok),
-    )
-    assert r.status == 201
-    data = await r.json()
-    assert "token" in data and "identity_pk" in data and "dh_pk" in data
-
-
-async def test_initiate_pairing_requires_inbox(client):
+    # Body is empty — server sources the inbox base URL from the
+    # platform adapter (seeded via [standalone].external_url in
+    # tests/routes/conftest.py).
     r = await client.post(
         "/api/pairing/initiate",
         json={},
         headers=_auth(client._tok),
     )
+    assert r.status == 201
+    data = await r.json()
+    assert "token" in data and "identity_pk" in data and "dh_pk" in data
+    # Advertised URL = seeded base + "/" + generated own_local_inbox_id.
+    assert data["inbox_url"].startswith(
+        "https://test.example/federation/inbox/",
+    )
+
+
+async def test_initiate_pairing_not_configured_when_base_missing(
+    tmp_dir, aiohttp_client
+):
+    """422 NOT_CONFIGURED when [standalone].external_url is unset."""
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
+    )
+    from socialhome.app import create_app
+    from socialhome.app_keys import db_key as _db_key
+    from socialhome.auth import sha256_token_hash
+    from socialhome.crypto import derive_user_id
+
+    app = create_app(cfg)
+    tc = await aiohttp_client(app)
+    db = app[_db_key]
+    row = await db.fetchone(
+        "SELECT identity_public_key FROM instance_identity WHERE id='self'"
+    )
+    pk_bytes = bytes.fromhex(row["identity_public_key"])
+    uid = derive_user_id(pk_bytes, "admin")
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,1)",
+        ("admin", uid, "Admin"),
+    )
+    raw = "tok"
+    await db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        ("t1", uid, "t", sha256_token_hash(raw)),
+    )
+    r = await tc.post(
+        "/api/pairing/initiate",
+        json={},
+        headers={"Authorization": f"Bearer {raw}"},
+    )
     assert r.status == 422
+    body = await r.json()
+    assert body["error"]["code"] == "NOT_CONFIGURED"
 
 
-async def test_initiate_pairing_bad_json_400(client):
+async def test_initiate_pairing_bad_json_still_ok(client):
+    """Unparseable body used to be 400 — now the body is ignored entirely,
+    so the route proceeds on the adapter-provided base and returns 201.
+    """
     r = await client.post(
         "/api/pairing/initiate",
         data="nope",
         headers={**_auth(client._tok), "Content-Type": "application/json"},
     )
-    assert r.status == 400
+    assert r.status == 201
 
 
 async def test_accept_pairing_rejects_malformed(client):

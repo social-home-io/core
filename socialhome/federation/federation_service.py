@@ -1032,9 +1032,14 @@ class FederationService:
     # :class:`PairingCoordinator`. The three methods below are thin
     # delegations so the public surface of FederationService is unchanged.
 
-    async def initiate_pairing(self, inbox_url: str) -> dict:
-        """Delegates to :class:`PairingCoordinator`."""
-        return await self._pairing.initiate(inbox_url)
+    async def initiate_pairing(self, inbox_base_url: str) -> dict:
+        """Delegates to :class:`PairingCoordinator`.
+
+        ``inbox_base_url`` is the external scheme+host+path prefix peers
+        will POST to. The coordinator appends a freshly-minted
+        ``own_local_inbox_id`` before baking the URL into the QR.
+        """
+        return await self._pairing.initiate(inbox_base_url)
 
     async def accept_pairing(self, qr_payload: dict) -> dict:
         """Delegates to :class:`PairingCoordinator`."""

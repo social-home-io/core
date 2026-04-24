@@ -237,6 +237,28 @@ class StandaloneAdapter:
             currency="USD",
         )
 
+    # ── Federation inbox base URL (§11) ───────────────────────────────────
+
+    async def get_federation_base(self) -> str | None:
+        """Return ``[standalone].external_url`` + ``/federation/inbox``.
+
+        ``[standalone].external_url`` is the publicly-reachable base the
+        admin has configured — "https://social.example.com". We append
+        the inbox path so the coordinator can build per-peer URLs by
+        concatenating the peer's ``local_inbox_id``.
+
+        Returns ``None`` when the option is unset; the pairing route
+        converts that to a 422 ``NOT_CONFIGURED`` so the admin knows to
+        set the URL before issuing a QR.
+        """
+        raw = self._options.get("external_url") if self._options else None
+        if not raw:
+            return None
+        base = str(raw).rstrip("/")
+        if not base:
+            return None
+        return f"{base}/federation/inbox"
+
     # ── Push notifications ────────────────────────────────────────────────
 
     async def send_push(

@@ -27,6 +27,7 @@ from ..app_keys import (
     federation_repo_key,
     federation_service_key,
     pairing_relay_queue_key,
+    platform_adapter_key,
 )
 from ..domain.federation import FederationEventType, PairingStatus
 from ..security import error_response
@@ -55,19 +56,33 @@ def _instance_dict(inst) -> dict:
 
 
 class PairingInitiateView(BaseView):
-    """``POST /api/pairing/initiate`` — generate QR pairing payload."""
+    """``POST /api/pairing/initiate`` — generate QR pairing payload.
+
+    The inbox URL is sourced from the platform adapter, not from the
+    request body. In standalone mode this comes from
+    ``[standalone].external_url``; in HA mode it's the value the HA
+    integration has pushed into ``instance_config`` (Nabu Casa Remote
+    UI or admin-set ``external_url``).
+
+    Returns 422 ``NOT_CONFIGURED`` if the adapter has no base to offer —
+    admin must set the URL before they can issue a QR.
+    """
 
     async def post(self) -> web.Response:
         self.user  # auth check
-        body = await self.body()
-        inbox_url = str(body.get("inbox_url") or "").strip()
-        if not inbox_url:
+        adapter = self.svc(platform_adapter_key)
+        base = await adapter.get_federation_base()
+        if not base:
             return error_response(
                 422,
-                "UNPROCESSABLE",
-                "inbox_url is required.",
+                "NOT_CONFIGURED",
+                (
+                    "Set external URL in Home Assistant (Settings ▸ System ▸ "
+                    "Network / Nabu Casa) or config.toml [standalone].external_url "
+                    "before pairing."
+                ),
             )
-        qr = await self.svc(federation_service_key).initiate_pairing(inbox_url)
+        qr = await self.svc(federation_service_key).initiate_pairing(base)
         return web.json_response(qr, status=201)
 
 

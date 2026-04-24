@@ -57,6 +57,7 @@ class HomeAssistantAdapter:
         "_ha_client",
         "_supervisor_client",
         "_ha_bridge",
+        "_db",
     )
 
     def __init__(
@@ -80,6 +81,9 @@ class HomeAssistantAdapter:
         self._ha_client: HaClient | None = ha_client
         self._supervisor_client: SupervisorClient | None = supervisor_client
         self._ha_bridge: HaBridgeService | None = None
+        # ``_db`` is wired in :meth:`on_startup`; used to read the
+        # HA-integration-pushed federation base URL from ``instance_config``.
+        self._db: Any | None = None
 
     @property
     def _client(self) -> HaClient:
@@ -174,6 +178,34 @@ class HomeAssistantAdapter:
             currency=cfg.get("currency", "USD"),
         )
 
+    # ── Federation inbox base URL (§11) ───────────────────────────────────
+
+    async def get_federation_base(self) -> str | None:
+        """Return the base URL the HA integration last advertised.
+
+        The addon never guesses this — the HA integration knows the
+        externally-reachable URL (admin-set ``external_url`` or Nabu
+        Casa Remote UI) and pushes it to the addon via the
+        ``federation.set_base`` WS command (wired in PR 4). The value
+        is cached in ``instance_config['ha_federation_base']``.
+
+        Returns ``None`` before the integration has pushed a base; the
+        pairing route surfaces that as 422 ``NOT_CONFIGURED`` so the
+        admin knows the HA integration isn't ready yet.
+        """
+        if self._db is None:
+            return None
+        row = await self._db.fetchone(
+            "SELECT value FROM instance_config WHERE key=?",
+            ("ha_federation_base",),
+        )
+        if row is None:
+            return None
+        raw = str(row["value"] or "").strip()
+        if not raw:
+            return None
+        return raw.rstrip("/")
+
     # ── Push notifications ────────────────────────────────────────────────
 
     async def send_push(
@@ -210,6 +242,7 @@ class HomeAssistantAdapter:
     async def on_startup(self, app: "web.Application") -> None:
         """Wire the HA client + bridge; run bootstrap when running as add-on."""
         session = app[K.http_session_key]
+        self._db = app[K.db_key]
         if self._ha_client is None:
             self._ha_client = build_ha_client(
                 session,

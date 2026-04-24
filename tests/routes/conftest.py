@@ -4,6 +4,8 @@
 handler. Each test still gets a fresh DB for isolation.
 """
 
+from types import MappingProxyType
+
 import pytest
 
 from socialhome.app import create_app
@@ -28,6 +30,15 @@ async def client(aiohttp_client, tmp_dir):
         mode="standalone",
         log_level="WARNING",
         db_write_batch_timeout_ms=10,
+        # Seed [standalone].external_url so StandaloneAdapter.
+        # get_federation_base() resolves — pairing route needs this.
+        platform_options=MappingProxyType(
+            {
+                "standalone": MappingProxyType(
+                    {"external_url": "https://test.example"},
+                ),
+            },
+        ),
     )
     app = create_app(cfg)
     tc = await aiohttp_client(app)

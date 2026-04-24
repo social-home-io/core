@@ -431,3 +431,86 @@ async def test_on_startup_skips_bootstrap_without_supervisor_token(tmp_path):
         await adapter.on_startup(app)
         assert await db.fetchval("SELECT COUNT(*) FROM users") == 0
     await db.shutdown()
+
+
+# ─── get_federation_base (§11) ────────────────────────────────────────────
+
+
+async def test_get_federation_base_returns_none_before_integration_push(tmp_path):
+    """Pre-startup (no db wired) returns None."""
+    adapter = _build_adapter(client=_FakeHaClient())
+    assert await adapter.get_federation_base() is None
+
+
+async def test_get_federation_base_reads_instance_config(tmp_path):
+    """Post-startup, returns whatever the HA integration wrote."""
+    db = AsyncDatabase(tmp_path / "test.db", batch_timeout_ms=10)
+    await db.startup()
+    kp = generate_identity_keypair()
+    iid = derive_instance_id(kp.public_key)
+    await db.enqueue(
+        "INSERT INTO instance_identity(instance_id, identity_private_key,"
+        " identity_public_key, routing_secret) VALUES(?,?,?,?)",
+        (iid, kp.private_key.hex(), kp.public_key.hex(), "aa" * 32),
+    )
+    await db.enqueue(
+        "INSERT INTO instance_config(key, value) VALUES(?, ?)",
+        (
+            "ha_federation_base",
+            "https://abc.ui.nabu.casa/api/social_home/inbox",
+        ),
+    )
+
+    app = web.Application()
+    app[db_key] = db
+    app[event_bus_key] = EventBus()
+    async with aiohttp.ClientSession() as session:
+        app[http_session_key] = session
+        adapter = HomeAssistantAdapter(
+            ha_url="http://ha.local:8123",
+            ha_token="",
+            supervisor_url="http://supervisor",
+            supervisor_token="",
+            data_dir=str(tmp_path),
+        )
+        await adapter.on_startup(app)
+        assert (
+            await adapter.get_federation_base()
+            == "https://abc.ui.nabu.casa/api/social_home/inbox"
+        )
+    await db.shutdown()
+
+
+async def test_get_federation_base_strips_trailing_slash(tmp_path):
+    db = AsyncDatabase(tmp_path / "test.db", batch_timeout_ms=10)
+    await db.startup()
+    kp = generate_identity_keypair()
+    iid = derive_instance_id(kp.public_key)
+    await db.enqueue(
+        "INSERT INTO instance_identity(instance_id, identity_private_key,"
+        " identity_public_key, routing_secret) VALUES(?,?,?,?)",
+        (iid, kp.private_key.hex(), kp.public_key.hex(), "aa" * 32),
+    )
+    await db.enqueue(
+        "INSERT INTO instance_config(key, value) VALUES(?, ?)",
+        ("ha_federation_base", "https://example/api/social_home/inbox/"),
+    )
+
+    app = web.Application()
+    app[db_key] = db
+    app[event_bus_key] = EventBus()
+    async with aiohttp.ClientSession() as session:
+        app[http_session_key] = session
+        adapter = HomeAssistantAdapter(
+            ha_url="http://ha.local:8123",
+            ha_token="",
+            supervisor_url="http://supervisor",
+            supervisor_token="",
+            data_dir=str(tmp_path),
+        )
+        await adapter.on_startup(app)
+        assert (
+            await adapter.get_federation_base()
+            == "https://example/api/social_home/inbox"
+        )
+    await db.shutdown()

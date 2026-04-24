@@ -214,9 +214,12 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
     peerHint.value = null
     sasAutofilledRef.current = false
     try {
-      const result = await api.post('/api/pairing/initiate', {
-        inbox_url: `${location.origin}/federation/inbox`,
-      }) as { token: string; [key: string]: unknown }
+      // No body: the server sources the inbox base URL from the platform
+      // adapter (HA integration pushes it; standalone reads
+      // [standalone].external_url). Returns 422 NOT_CONFIGURED if unset.
+      const result = await api.post('/api/pairing/initiate', {}) as {
+        token: string; [key: string]: unknown
+      }
       qrPayload.value = JSON.stringify(result)
       pairingToken.value = result.token
       step.value = 'waiting'
