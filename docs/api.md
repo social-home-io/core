@@ -309,7 +309,7 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/pairing/initiate` | Generate a QR payload. |
+| POST | `/api/pairing/initiate` | Generate a QR payload. Empty body; base URL comes from the platform adapter (`[standalone].external_url` or the HA integration's pushed base). Returns 422 `NOT_CONFIGURED` if unset. |
 | POST | `/api/pairing/accept` | Scanner posts its side of the DH. |
 | POST | `/api/pairing/confirm` | Confirm SAS-verified pair. |
 | POST | `/api/pairing/introduce` | Introduce self to an intermediary. |

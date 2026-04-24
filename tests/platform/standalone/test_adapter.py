@@ -309,3 +309,47 @@ async def test_stream_transcribe_audio_raises(adapter):
 
     with pytest.raises(NotImplementedError):
         await adapter.stream_transcribe_audio(_audio())
+
+
+# ── get_federation_base (§11) ─────────────────────────────────────────────────
+
+
+async def test_get_federation_base_returns_none_when_unset(db, cfg):
+    """No [standalone].external_url → None."""
+    adapter = StandaloneAdapter(db=db, config=cfg)
+    assert await adapter.get_federation_base() is None
+
+
+async def test_get_federation_base_composes_inbox_path(db, cfg):
+    """external_url gets /federation/inbox appended."""
+    adapter = StandaloneAdapter(
+        db=db,
+        config=cfg,
+        options={"external_url": "https://social.example.com"},
+    )
+    assert (
+        await adapter.get_federation_base()
+        == "https://social.example.com/federation/inbox"
+    )
+
+
+async def test_get_federation_base_strips_trailing_slash(db, cfg):
+    """Trailing slashes on external_url don't produce double-slashes."""
+    adapter = StandaloneAdapter(
+        db=db,
+        config=cfg,
+        options={"external_url": "https://social.example.com/"},
+    )
+    assert (
+        await adapter.get_federation_base()
+        == "https://social.example.com/federation/inbox"
+    )
+
+
+async def test_get_federation_base_empty_string_is_none(db, cfg):
+    adapter = StandaloneAdapter(
+        db=db,
+        config=cfg,
+        options={"external_url": ""},
+    )
+    assert await adapter.get_federation_base() is None

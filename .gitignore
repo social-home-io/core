@@ -32,7 +32,8 @@ integration_token.txt
 client/node_modules/
 client/dist/
 client/coverage/
-social_home/static/*
+socialhome/static/*
+!socialhome/static/.gitkeep
 *.tsbuildinfo
 
 # IDE

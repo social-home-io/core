@@ -94,6 +94,30 @@ class AbstractPlatformAdapter(Protocol):
         """Return current instance location / regional configuration."""
         ...
 
+    async def get_federation_base(self) -> str | None:
+        """Return the externally-reachable scheme+host+path prefix peers
+        POST federation envelopes to, or ``None`` if unconfigured.
+
+        The full per-peer URL is composed by the pairing coordinator as
+        ``f"{base}/{local_inbox_id}"``. ``None`` is a hard error for the
+        caller — the pairing route surfaces it as 422 ``NOT_CONFIGURED``
+        so the admin knows to set ``[standalone].external_url`` (or HA
+        Network settings / Nabu Casa Remote UI) before pairing.
+
+        Implementations:
+
+        * :class:`~socialhome.platform.standalone.StandaloneAdapter` reads
+          ``[standalone].external_url`` from the TOML options passed in at
+          construction. Appends ``/federation/inbox`` if the configured
+          URL is just a host.
+        * :class:`~socialhome.platform.ha.HomeAssistantAdapter` reads the
+          value the HA integration last pushed via the
+          ``federation.set_base`` WS command (cached in
+          ``instance_config``). Returns ``None`` until the integration
+          has pushed a base.
+        """
+        ...
+
     async def send_push(
         self,
         user: ExternalUser,
