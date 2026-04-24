@@ -69,6 +69,7 @@ class PairingInboundHandlers:
         registry.register(FederationEventType.PAIRING_CONFIRM, self._on_confirm)
         registry.register(FederationEventType.PAIRING_ABORT, self._on_abort)
         registry.register(FederationEventType.UNPAIR, self._on_unpair)
+        registry.register(FederationEventType.URL_UPDATED, self._on_url_updated)
         if self._dm_contact_repo is not None:
             registry.register(
                 FederationEventType.DM_CONTACT_REQUEST,
@@ -180,6 +181,39 @@ class PairingInboundHandlers:
             return
         await self._repo.delete_instance(instance.id)
         await self._bus.publish(PeerUnpaired(instance_id=event.from_instance))
+
+    async def _on_url_updated(self, event: "FederationEvent") -> None:
+        """Peer advertised a new inbox URL — update ``remote_inbox_url``.
+
+        The envelope is already signed + origin-verified by the inbound
+        pipeline, so the sender is authoritative for their own URL. We
+        still sanity-check the shape (non-empty, http(s) scheme) before
+        persisting; garbage URLs would silently break future deliveries.
+        """
+        new_url = str(event.payload.get("inbox_url") or "").strip()
+        if not new_url:
+            log.debug("URL_UPDATED from %s: empty inbox_url", event.from_instance)
+            return
+        if not (new_url.startswith("http://") or new_url.startswith("https://")):
+            log.warning(
+                "URL_UPDATED from %s: rejected scheme in %r",
+                event.from_instance,
+                new_url,
+            )
+            return
+        instance = await self._repo.get_instance(event.from_instance)
+        if instance is None:
+            log.debug(
+                "URL_UPDATED from unknown instance=%s — drop",
+                event.from_instance,
+            )
+            return
+        await self._repo.update_inbox(event.from_instance, new_url)
+        log.info(
+            "URL_UPDATED from %s: remote_inbox_url -> %s",
+            event.from_instance,
+            new_url,
+        )
 
     async def _on_contact_request(self, event: "FederationEvent") -> None:
         """§23.47: pre-pairing DM handshake — a remote user wants to start
