@@ -59,6 +59,22 @@ class _FakeFederationRepo:
     async def delete_pairing(self, token):
         self.pairings.pop(token, None)
 
+    async def update_inbox(self, instance_id: str, new_url: str) -> None:
+        inst = self.instances.get(instance_id)
+        if inst is None:
+            return
+        self.instances[instance_id] = RemoteInstance(
+            id=inst.id,
+            display_name=inst.display_name,
+            remote_identity_pk=inst.remote_identity_pk,
+            key_self_to_remote=inst.key_self_to_remote,
+            key_remote_to_self=inst.key_remote_to_self,
+            remote_inbox_url=new_url,
+            local_inbox_id=inst.local_inbox_id,
+            status=inst.status,
+            source=inst.source,
+        )
+
 
 def _event(event_type, payload, *, from_instance="peer-a", space_id=None):
     return FederationEvent(
@@ -104,8 +120,8 @@ def handlers(bus, repo):
     return h
 
 
-async def test_attach_registers_five_event_types(bus, repo):
-    """attach_to wires the expected five pairing events."""
+async def test_attach_registers_six_event_types(bus, repo):
+    """attach_to wires the six pairing events."""
     h = PairingInboundHandlers(bus=bus, federation_repo=repo)
     fed = _FakeFederationService()
     h.attach_to(fed)
@@ -116,6 +132,7 @@ async def test_attach_registers_five_event_types(bus, repo):
         FederationEventType.PAIRING_CONFIRM,
         FederationEventType.PAIRING_ABORT,
         FederationEventType.UNPAIR,
+        FederationEventType.URL_UPDATED,
     }
 
 
@@ -274,3 +291,53 @@ async def test_unpair_unknown_peer_is_noop(bus, handlers):
         )
     )
     assert captured == []
+
+
+# ── URL_UPDATED ──────────────────────────────────────────────────────────
+
+
+async def test_url_updated_rewrites_remote_inbox_url(repo, handlers):
+    repo.instances["peer-a"] = _sample_instance("peer-a", PairingStatus.CONFIRMED)
+    await handlers._on_url_updated(
+        _event(
+            FederationEventType.URL_UPDATED,
+            {"inbox_url": "https://new.example.com/federation/inbox/wh-peer-a"},
+        )
+    )
+    assert (
+        repo.instances["peer-a"].remote_inbox_url
+        == "https://new.example.com/federation/inbox/wh-peer-a"
+    )
+
+
+async def test_url_updated_rejects_empty(repo, handlers):
+    repo.instances["peer-a"] = _sample_instance("peer-a", PairingStatus.CONFIRMED)
+    original = repo.instances["peer-a"].remote_inbox_url
+    await handlers._on_url_updated(
+        _event(FederationEventType.URL_UPDATED, {"inbox_url": ""}),
+    )
+    assert repo.instances["peer-a"].remote_inbox_url == original
+
+
+async def test_url_updated_rejects_bad_scheme(repo, handlers):
+    repo.instances["peer-a"] = _sample_instance("peer-a", PairingStatus.CONFIRMED)
+    original = repo.instances["peer-a"].remote_inbox_url
+    await handlers._on_url_updated(
+        _event(
+            FederationEventType.URL_UPDATED,
+            {"inbox_url": "ftp://nope.example/x"},
+        )
+    )
+    assert repo.instances["peer-a"].remote_inbox_url == original
+
+
+async def test_url_updated_unknown_peer_is_noop(repo, handlers):
+    # No side-effects even if the instance is not known locally.
+    await handlers._on_url_updated(
+        _event(
+            FederationEventType.URL_UPDATED,
+            {"inbox_url": "https://x/y"},
+            from_instance="unknown-peer",
+        )
+    )
+    assert "unknown-peer" not in repo.instances
