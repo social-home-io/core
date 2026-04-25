@@ -17,10 +17,19 @@ from socialhome.crypto import b64url_decode, verify_ed25519
 from socialhome.services.gfs_ws_client import GfsWebSocketClient, _to_ws_url
 
 
-@pytest.fixture(autouse=True)
-def _enable_sockets(socket_enabled):
-    """``aiohttp.test_utils.TestServer`` needs a real loopback socket; the
-    transitive HA pytest plugin disables sockets globally in this env."""
+try:
+    import pytest_socket  # noqa: F401
+
+    @pytest.fixture(autouse=True)
+    def _enable_sockets(socket_enabled):
+        """Re-enable sockets if the HA pytest plugin disabled them.
+
+        CI does not install ``pytest-socket``; on those runs this fixture
+        is not registered and the test uses sockets normally.
+        """
+
+except ImportError:  # pragma: no cover - CI path
+    pass
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -52,9 +61,7 @@ def test_to_ws_url_http():
 
 
 def test_to_ws_url_strips_trailing_slash():
-    assert (
-        _to_ws_url("https://gfs.example.com/") == "wss://gfs.example.com/gfs/ws"
-    )
+    assert _to_ws_url("https://gfs.example.com/") == "wss://gfs.example.com/gfs/ws"
 
 
 # ── In-process fake GFS WebSocket server ──────────────────────────────────────

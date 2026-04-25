@@ -44,9 +44,9 @@ def _to_ws_url(http_url: str) -> str:
     """Convert ``http(s)://host`` to the matching ``ws(s)://host/gfs/ws``."""
     base = http_url.rstrip("/")
     if base.startswith("https://"):
-        return "wss://" + base[len("https://"):] + "/gfs/ws"
+        return "wss://" + base[len("https://") :] + "/gfs/ws"
     if base.startswith("http://"):
-        return "ws://" + base[len("http://"):] + "/gfs/ws"
+        return "ws://" + base[len("http://") :] + "/gfs/ws"
     return base + "/gfs/ws"
 
 
@@ -109,7 +109,7 @@ class GfsWebSocketClient:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
 

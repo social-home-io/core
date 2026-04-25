@@ -146,7 +146,7 @@ class GfsWebSocketView(web.View):
 
         try:
             ts = int(ts_raw)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             await ws.close(code=WS_CLOSE_AUTH_FAILED, message=b"bad-ts")
             return None
 
@@ -164,7 +164,7 @@ class GfsWebSocketView(web.View):
         try:
             raw_key = bytes.fromhex(instance.public_key)
             raw_sig = crypto.b64url_decode(sig)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             await ws.close(code=WS_CLOSE_AUTH_FAILED, message=b"bad-signature")
             return None
 

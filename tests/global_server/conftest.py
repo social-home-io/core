@@ -13,15 +13,21 @@ _GFS_MIGRATIONS = Path(__file__).resolve().parent.parent.parent / (
 )
 
 
-@pytest.fixture(autouse=True)
-def _enable_sockets(socket_enabled):
-    """GFS tests run aiohttp ``TestServer`` instances; sockets must be live.
+# Some dev environments transitively pull in
+# ``pytest-homeassistant-custom-component``, which globally disables
+# sockets via ``pytest-socket``. GFS tests use real ``aiohttp.TestServer``
+# loopback connections, so re-enable sockets when both plugins are
+# present. CI does not install either plugin; the fixture simply does
+# not register and tests run normally.
+try:
+    import pytest_socket  # noqa: F401
 
-    The transitive ``pytest-homeassistant-custom-component`` plugin disables
-    sockets globally — this autouse fixture re-enables them for every test
-    in the GFS suite so :class:`aiohttp.test_utils.TestClient` and the
-    WebSocket route in particular can run against a real loopback server.
-    """
+    @pytest.fixture(autouse=True)
+    def _enable_sockets(socket_enabled):
+        """Re-enable sockets if the HA pytest plugin disabled them."""
+
+except ImportError:  # pragma: no cover - CI path
+    pass
 
 
 @pytest.fixture

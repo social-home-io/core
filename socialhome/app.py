@@ -1288,9 +1288,15 @@ def create_app(config: Config | None = None) -> web.Application:
         # GFS WebSocket supervisor (§24.12) — opens a persistent
         # ``wss://`` connection to every paired GFS so relay events
         # arrive without an HTTPS callback. SH→GFS REST stays unchanged.
+        # Inbound relay frames are logged here today; integration into the
+        # federation inbound pipeline is a follow-up.
         async def _on_gfs_relay(frame: dict) -> None:
-            event_body = {k: v for k, v in frame.items() if k != "type"}
-            await bus.publish("gfs.relay.received", event_body)
+            log.info(
+                "gfs.relay.received: space=%s event=%s from=%s",
+                frame.get("space_id"),
+                frame.get("event_type"),
+                frame.get("from_instance"),
+            )
 
         nonlocal gfs_ws_supervisor
         gfs_ws_supervisor = GfsWebSocketSupervisor(

@@ -124,7 +124,7 @@ class GfsWebSocketRegistry:
         try:
             await ws.send_str(msg)
             return True
-        except (ConnectionResetError, RuntimeError, asyncio.CancelledError):
+        except ConnectionResetError, RuntimeError, asyncio.CancelledError:
             await self._drop_dead(instance_id, ws)
             return False
         except Exception as exc:  # defensive
