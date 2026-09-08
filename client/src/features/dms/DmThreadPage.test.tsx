@@ -14,24 +14,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 vi.setConfig({ testTimeout: 20_000 })
 const RENDER_WAIT = 15_000
 
-// Mock the API module before importing the page
-vi.mock('@/api', () => ({
-  api: {
-    get: vi.fn().mockResolvedValue([]),
-    post: vi.fn().mockResolvedValue({}),
-    patch: vi.fn().mockResolvedValue({}),
-    delete: vi.fn().mockResolvedValue(undefined),
-  },
-}))
-
-// Mock auth store
-vi.mock('@/store/auth', () => ({
-  currentUser: { value: { user_id: 'u1', username: 'admin', display_name: 'Admin', is_admin: true, picture_url: null, bio: null, is_new_member: false } },
-  token: { value: 'test-tok' },
-  isAuthed: { value: true },
-  setToken: vi.fn(),
-  logout: vi.fn(),
-}))
+// NOTE: ``@/api`` and ``@/store/auth`` are mocked ONCE each, further down
+// next to the fixtures they serve. This file used to register a second,
+// competing factory for both up here — an easy mistake, because
+// ``vi.mock`` is hoisted so the two registrations look far apart in the
+// source but land on the same module id. The first ``@/api`` factory
+// hardwired ``get`` to ``mockResolvedValue([])``, which no test could
+// steer; whenever the registry served that one instead of the
+// delegating factory below, every fetch resolved empty, the thread
+// rendered no messages, and the four "jump-down chip integration"
+// tests burned their full waitFor budget. It presented as a CI-only
+// flake for months (see the ceilings above and the fork cap in
+// vitest.config.ts, both of which were attempts at this symptom).
+// Keep exactly one factory per module id.
 
 describe('DmThreadPage', () => {
   it('module exports a default component', async () => {
