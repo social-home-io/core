@@ -195,3 +195,53 @@ async def test_import_prompt_unauth_401(client):
         json={"prompt": "hi"},
     )
     assert r.status == 401
+
+
+# ─── all-day tz convention (bare ICS DATE is floating) ─────────────────
+
+
+_ICS_ALL_DAY_AND_TIMED = (
+    b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//T//EN\r\n"
+    b"BEGIN:VEVENT\r\nUID:trip@t\r\nSUMMARY:Trip\r\n"
+    b"DTSTART;VALUE=DATE:20260910\r\nDTEND;VALUE=DATE:20260913\r\n"
+    b"END:VEVENT\r\n"
+    b"BEGIN:VEVENT\r\nUID:call@t\r\nSUMMARY:Call\r\n"
+    b"DTSTART:20260910T170000Z\r\nDTEND:20260910T180000Z\r\n"
+    b"END:VEVENT\r\nEND:VCALENDAR\r\n"
+)
+
+
+async def test_import_ics_all_day_event_is_anchored_to_utc(client):
+    """A bare-``DATE`` VEVENT stores UTC-midnight bounds, so its ``tz``
+    must say ``UTC`` — otherwise a client reading the day in ``event.tz``
+    (per docs/api.md) shifts it west of UTC.
+
+    The timed VEVENT in the same import still resolves the household
+    zone: the fix is scoped to all-day rows.
+    """
+    await client._db.enqueue(
+        "UPDATE users SET tz=? WHERE username=?",
+        ("America/Los_Angeles", "admin"),
+    )
+
+    cid = await _create_calendar(client)
+    r = await client.post(
+        f"/api/calendars/{cid}/import_ics",
+        data=_ICS_ALL_DAY_AND_TIMED,
+        headers={**_auth(client._tok), "Content-Type": "text/calendar"},
+    )
+    assert r.status == 201, await r.text()
+    events = {e["summary"]: e for e in (await r.json())["events"]}
+    assert set(events) == {"Trip", "Call"}
+
+    trip = events["Trip"]
+    assert trip["all_day"] is True
+    assert trip["tz"] == "UTC"
+    assert trip["start"] == "2026-09-10T00:00:00+00:00"
+    # ICS DTEND on a bare DATE is exclusive — stored verbatim; the
+    # client derives the last inclusive moment.
+    assert trip["end"] == "2026-09-13T00:00:00+00:00"
+
+    call = events["Call"]
+    assert call["all_day"] is False
+    assert call["tz"] == "America/Los_Angeles"

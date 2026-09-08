@@ -7,7 +7,7 @@ RSVP responses propagate back to the organiser's local row.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -660,3 +660,42 @@ async def test_inbound_invite_rejects_non_string_uuid(env):
     )
     ev = next(iter(cal_repo.events.values()))
     assert ev.client_event_uuid is None
+
+
+# ─── peer-supplied tz is validated at the trust boundary ───────────────
+
+
+@pytest.mark.parametrize(
+    ("wire_tz", "expected"),
+    [
+        ("Foo/Bar", "UTC"),
+        ("Europe/Zurich", "Europe/Zurich"),
+    ],
+)
+async def test_inbound_invite_validates_peer_tz(env, wire_tz, expected):
+    """An unknown IANA name from a peer must not reach the SPA (``Intl``
+    raises ``RangeError`` on it and the whole calendar fails to render).
+    Fail closed on the value, not the event — the row still lands,
+    anchored to ``"UTC"``."""
+    fed, cal_repo, _ = env
+    handler = fed._event_registry.handlers[
+        FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED
+    ]
+    now = datetime.now(UTC)
+    await handler(
+        _envelope(
+            FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED,
+            {
+                "event_id": "remote-evt-tz",
+                "summary": "Zone test",
+                "start": now.isoformat(),
+                "end": (now + timedelta(hours=1)).isoformat(),
+                "organizer_user_id": "u-bob",
+                "attendee_user_ids": ["u-anna"],
+                "tz": wire_tz,
+            },
+        )
+    )
+    assert len(cal_repo.events) == 1
+    ev = next(iter(cal_repo.events.values()))
+    assert ev.tz == expected

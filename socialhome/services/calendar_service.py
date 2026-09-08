@@ -16,7 +16,6 @@ import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..domain.calendar import (
     Calendar,
@@ -38,6 +37,7 @@ from ..infrastructure.event_bus import EventBus
 from ..media_signer import strip_signature_query
 from ..repositories.calendar_repo import AbstractCalendarRepo, AbstractSpaceCalendarRepo
 from ..utils.rrule import expand_rrule
+from ..utils.timezones import is_valid_tz
 from .bus_publisher import BusPublisherMixin
 
 if TYPE_CHECKING:
@@ -229,21 +229,19 @@ class CalendarService(BusPublisherMixin):
         SPA has touched the relevant row the resolution prefers the
         more specific value over the household fallback.
 
-        Validation is best-effort: an unknown IANA name from the
-        request falls back to the next layer rather than 400'ing —
-        the SPA always sends a value detected by ``Intl`` so this is a
-        safety belt for hand-written API clients.
+        Validation is best-effort (:func:`is_valid_tz`): an unknown
+        IANA name from the request falls back to the next layer rather
+        than 400'ing — the SPA always sends a value detected by
+        ``Intl`` so this is a safety belt for hand-written API clients.
         """
         if explicit:
-            try:
-                ZoneInfo(explicit)
+            if is_valid_tz(explicit):
                 return explicit
-            except ZoneInfoNotFoundError:
-                log.warning(
-                    "calendar create_event got unknown tz %r — falling "
-                    "back to owner / household",
-                    explicit,
-                )
+            log.warning(
+                "calendar create_event got unknown tz %r — falling "
+                "back to owner / household",
+                explicit,
+            )
         if self._user_repo is not None:
             owner = await self._user_repo.get(owner_username)
             if owner is not None and owner.tz and owner.tz != "UTC":
@@ -605,7 +603,7 @@ class CalendarService(BusPublisherMixin):
         the field. The other fields use ``None``/``"no change"`` directly
         because none of them have an ambiguous-clear shape.
 
-        ``tz`` is validated via ``ZoneInfo`` and only overwrites the
+        ``tz`` is validated via :func:`is_valid_tz` and only overwrites the
         existing event tz when explicitly passed — leaving it absent
         preserves the wall-clock anchor stamped at create time.
         """
@@ -620,10 +618,8 @@ class CalendarService(BusPublisherMixin):
         if new_end < new_start:
             raise ValueError("event end must not be before start")
         if tz is not None:
-            try:
-                ZoneInfo(tz)
-            except ZoneInfoNotFoundError as exc:
-                raise ValueError(f"unknown IANA timezone {tz!r}") from exc
+            if not is_valid_tz(tz):
+                raise ValueError(f"unknown IANA timezone {tz!r}")
             new_tz = tz
         else:
             new_tz = existing.tz
@@ -944,15 +940,13 @@ class SpaceCalendarService(BusPublisherMixin):
         client's fault, not a normal flow.
         """
         if explicit:
-            try:
-                ZoneInfo(explicit)
+            if is_valid_tz(explicit):
                 return explicit
-            except ZoneInfoNotFoundError:
-                log.warning(
-                    "space calendar create_event got unknown tz %r — falling "
-                    "back to space / household",
-                    explicit,
-                )
+            log.warning(
+                "space calendar create_event got unknown tz %r — falling "
+                "back to space / household",
+                explicit,
+            )
         if self._space_repo is not None:
             space = await self._space_repo.get(space_id)
             if space is not None and space.tz and space.tz != "UTC":
@@ -1233,10 +1227,8 @@ class SpaceCalendarService(BusPublisherMixin):
             assert location is None or isinstance(location, str)
             new_location = _clean_location(location)
         if tz is not None:
-            try:
-                ZoneInfo(tz)
-            except ZoneInfoNotFoundError as exc:
-                raise ValueError(f"unknown IANA timezone {tz!r}") from exc
+            if not is_valid_tz(tz):
+                raise ValueError(f"unknown IANA timezone {tz!r}")
             new_tz = tz
         else:
             new_tz = existing.tz

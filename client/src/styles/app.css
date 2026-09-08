@@ -5756,6 +5756,54 @@ body.sh-dm-thread-open .sh-messages {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* Multi-day spans — the agenda repeats an event under every day it
+ * covers, so each row has to say WHERE in the span it sits. Two
+ * signals, never colour alone: the left rail changes shape/texture,
+ * and ``.sh-event-span-badge`` spells it out in words ("Day 2 of 3").
+ *
+ * A true bar spanning several day cards isn't possible here — each
+ * ``.sh-calendar-day-group`` carries its own ``transform: rotate()``,
+ * which makes it a containing block. Instead the rail runs to the
+ * card edge on the open side (square there, rounded on the closed
+ * side) so consecutive days read as one thread down the stack. */
+.sh-event--continued::before {
+  /* Carried over from an earlier day: rail enters from the top edge,
+   * dashed so a glance separates "started before" from "starts here". */
+  top: 0;
+  border-start-start-radius: 0;
+  border-start-end-radius: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--cal-hue, var(--sh-primary)) 0 9px,
+    transparent 9px 13px
+  );
+}
+.sh-event--continues::before {
+  /* Runs on into a later day: rail leaves through the bottom edge. */
+  bottom: 0;
+  border-end-start-radius: 0;
+  border-end-end-radius: 0;
+}
+/* Meta cluster (time · span badge · all-day · location pin). Grouped
+ * so it can drop to its own line as one unit on a narrow phone
+ * instead of squeezing the title to an ellipsis stub. */
+.sh-event-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  margin-left: auto;
+}
+.sh-event-span-badge {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: var(--sh-radius-full);
+  border: 1px dashed color-mix(in srgb, var(--cal-hue, var(--sh-primary)) 45%, transparent);
+  color: var(--sh-text-muted);
+  font: 500 var(--sh-font-size-xs) / 1.4 var(--sh-font-family-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
 /* Faint "has-location" pin on the compact row — sits next to the
  * time so the eye picks it up while scanning a day. The full
  * location + maps link lives in the expanded ``.sh-event-detail``. */
@@ -5898,6 +5946,25 @@ body.sh-dm-thread-open .sh-messages {
   }
   .sh-cal-target-chip { font-size: var(--sh-font-size-xs); }
   .sh-calendar-day-group { padding: var(--sh-space-sm); }
+  /* A multi-day row carries far more meta than a plain one (date
+   * range + "day 2 of 3" on top of the owner chip), and at 390px flex
+   * shrank the TITLE to "Gra…" rather than wrapping — the meta cluster
+   * technically still fit. So on a span row the title claims the whole
+   * first line and everything else wraps beneath it. Plain single-day
+   * rows (no continuation class) keep the compact one-line layout. */
+  .sh-event--continued .sh-event-header,
+  .sh-event--continues .sh-event-header {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  .sh-event--continued .sh-event-header > strong,
+  .sh-event--continues .sh-event-header > strong {
+    flex: 1 1 100%;
+  }
+  .sh-event--continued .sh-event-meta,
+  .sh-event--continues .sh-event-meta {
+    margin-left: 0;
+  }
   .sh-event-header {
     /* Owner chip wraps under the title on narrow viewports — keeps the
      * title legible at glance. */

@@ -103,4 +103,58 @@ describe('CalendarPage', () => {
       'On the 14th', 'On the 19th', 'On the 21st',
     ])
   })
+
+  it('spreads a multi-day event across one day card per day, expanding only the clicked row', async () => {
+    // Regression for the bug where a Fri–Sun event was filed only
+    // under Friday (invisible when you looked at Saturday). Dates are
+    // built relative to ``new Date()`` because the page fetches — and
+    // now CLAMPS the day expansion to — the month range around today;
+    // hard-coded 2026 dates would only survive because the mock
+    // ignores the query string.
+    const now = new Date()
+    const iso = (day: number, hour: number) =>
+      new Date(now.getFullYear(), now.getMonth(), day, hour, 0, 0).toISOString()
+
+    const { api } = await import('@/api')
+    vi.mocked(api.get).mockImplementation(async (url: string) => {
+      if (url === '/api/calendars') {
+        return [{
+          id: 'cal-1',
+          name: 'Family',
+          owner_username: 'admin',
+          color: null,
+        }]
+      }
+      if (url.startsWith('/api/calendars/cal-1/events')) {
+        return [{
+          id: 'trip', calendar_id: 'cal-1', summary: 'Weekend trip',
+          description: null,
+          start: iso(5, 16), end: iso(7, 10),
+          all_day: false, rrule: null, capacity: null,
+          created_by: 'u1', attendees: ['u1'],
+          rsvp_enabled: false, location: null, cover_url: null,
+        }]
+      }
+      return []
+    })
+
+    const { render, waitFor, fireEvent } = await import('@testing-library/preact')
+    const mod = await import('./CalendarPage')
+    const { container } = render(<mod.default />)
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.sh-event strong').length).toBe(3)
+    }, { timeout: 2000 })
+    expect(container.querySelectorAll('.sh-calendar-day-group').length).toBe(3)
+
+    // Clicking the middle day's row expands exactly that row — the
+    // expansion is keyed by ``dayKey:eventId``, not by event id, so the
+    // same event on the other two day cards stays collapsed.
+    const rows = container.querySelectorAll('.sh-event')
+    fireEvent.click(rows[1])
+    await waitFor(() => {
+      expect(container.querySelectorAll('.sh-event-detail').length).toBe(1)
+    }, { timeout: 2000 })
+    expect(rows[1].querySelector('.sh-event-detail')).toBeTruthy()
+  })
 })

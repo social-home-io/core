@@ -123,6 +123,129 @@ describe('EventPostCard', () => {
     expect(when?.textContent).toContain(' – ')
   })
 
+  it('qualifies the end time with its date for an overnight event', async () => {
+    // Start/end offsets picked so the span always crosses a calendar
+    // day boundary regardless of what hour the test runs at (48h out,
+    // 26h long) — mirrors the "different offsets = different day"
+    // guard the all-day branch already has.
+    const start = new Date(Date.now() + 48 * 60 * 60 * 1000)
+    const end = new Date(start.getTime() + 26 * 60 * 60 * 1000)
+    const overnight = {
+      ...futureEvent,
+      id: 'ev-overnight',
+      tz: 'UTC',
+      start: start.toISOString(),
+      end: end.toISOString(),
+    }
+    apiMock.get.mockResolvedValueOnce(overnight)
+    const { container, findByText } = render(
+      <EventPostCard eventId="ev-overnight" />
+    )
+    await findByText('Going')
+    const when = container.querySelector('.sh-event-card-when-text')
+    const dateOpts: Intl.DateTimeFormatOptions = {
+      timeZone: 'UTC',
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+    }
+    const startDateStr = start.toLocaleDateString(undefined, dateOpts)
+    const endDateStr = end.toLocaleDateString(undefined, dateOpts)
+    expect(startDateStr).not.toBe(endDateStr)
+    expect(when?.textContent).toContain(startDateStr)
+    expect(when?.textContent).toContain(endDateStr)
+  })
+
+  it('anchors an all-day date on the event tz, not UTC', async () => {
+    // Regression: an all-day event is stored as 00:00 / 23:59 in the
+    // event's OWN tz (CalendarEventDialog), so a Zurich household's
+    // "1 May" lands at 2026-04-30T22:00Z. Formatting that instant in
+    // UTC printed the day before AND made the single day look like a
+    // two-day range ("Apr 30 – May 1").
+    const zurich = 'Europe/Zurich'
+    // 22:00Z is 00:00 the next day in Zurich (CEST/CET are both east
+    // of UTC), so this pair is one authored calendar day there.
+    const start = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+    start.setUTCHours(22, 0, 0, 0)
+    const end = new Date(start.getTime() + (23 * 60 + 59) * 60 * 1000)
+    const dateOpts: Intl.DateTimeFormatOptions = {
+      timeZone: zurich, weekday: 'short', month: 'short', day: 'numeric',
+    }
+    const authoredDay = start.toLocaleDateString(undefined, dateOpts)
+    // Guard the fixture's premise rather than trusting it silently.
+    expect(end.toLocaleDateString(undefined, dateOpts)).toBe(authoredDay)
+    const utcDay = start.toLocaleDateString(undefined, {
+      ...dateOpts, timeZone: 'UTC',
+    })
+    expect(utcDay).not.toBe(authoredDay)
+
+    apiMock.get.mockResolvedValueOnce({
+      ...futureEvent,
+      id: 'ev-allday',
+      all_day: true,
+      tz: zurich,
+      start: start.toISOString(),
+      end: end.toISOString(),
+    })
+    const { container, findByText } = render(
+      <EventPostCard eventId="ev-allday" />,
+    )
+    await findByText('Going')
+    const when = container.querySelector('.sh-event-card-when-text')
+    expect(when?.textContent).toBe(authoredDay)
+  })
+
+  it('treats an exclusive 00:00 all-day end as the previous day', async () => {
+    // ICS-imported all-day rows carry an EXCLUSIVE midnight end bound,
+    // so a 10–12 September event arrives as ``…-13T00:00:00Z``. The
+    // agenda row and the expanded detail already subtract the last
+    // millisecond; the card printed "Sep 10 – Sep 13".
+    const start = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+    start.setUTCHours(0, 0, 0, 0)
+    const end = new Date(start.getTime() + 3 * 24 * 60 * 60 * 1000)
+    const dateOpts: Intl.DateTimeFormatOptions = {
+      timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric',
+    }
+    const firstDay = start.toLocaleDateString(undefined, dateOpts)
+    const lastDay = new Date(end.getTime() - 1)
+      .toLocaleDateString(undefined, dateOpts)
+    const exclusiveDay = end.toLocaleDateString(undefined, dateOpts)
+    // Guard the fixture's premise rather than trusting it silently.
+    expect(lastDay).not.toBe(exclusiveDay)
+
+    apiMock.get.mockResolvedValueOnce({
+      ...futureEvent,
+      id: 'ev-ics-allday',
+      all_day: true,
+      tz: 'UTC',
+      start: start.toISOString(),
+      end: end.toISOString(),
+    })
+    const { container, findByText } = render(
+      <EventPostCard eventId="ev-ics-allday" />,
+    )
+    await findByText('Going')
+    const when = container.querySelector('.sh-event-card-when-text')
+    expect(when?.textContent).toBe(`${firstDay} – ${lastDay}`)
+  })
+
+  it('keeps rendering when the event carries a malformed tz', async () => {
+    // A peer / ICS import can put anything in ``event.tz``; Intl throws
+    // ``RangeError`` on an unknown zone, which used to blank the card.
+    apiMock.get.mockResolvedValueOnce({
+      ...futureEvent,
+      id: 'ev-bad-tz',
+      tz: 'Foo/Bar',
+    })
+    const { container, findByText } = render(
+      <EventPostCard eventId="ev-bad-tz" />,
+    )
+    await findByText('Going')
+    const when = container.querySelector('.sh-event-card-when-text')
+    expect(when?.textContent).toBeTruthy()
+    expect(when?.textContent).not.toContain('Invalid')
+  })
+
   it('renders attendance summary for uncapped events with responses', async () => {
     apiMock.get.mockResolvedValueOnce(futureEvent)
     rsvpCounts.value = { 'ev-1': { going: 7, maybe: 2, declined: 0 } }

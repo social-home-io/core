@@ -259,11 +259,25 @@ def _vevent_to_create(component: Any) -> CalendarEventCreate:
         description=description,
         rrule=rrule_str,
         location=location,
+        # A bare ICS ``DATE`` is a floating date — "10 Sep" means 10 Sep
+        # for everyone — and ``_as_datetime`` anchors it to UTC midnight.
+        # Pin ``tz="UTC"`` so the stored bounds and the stored zone agree:
+        # a client reads an all-day event's day back in ``event.tz``
+        # (docs/api.md), so letting the creator's zone land here would
+        # shift the day for every household west of UTC. Timed VEVENTs
+        # keep ``None`` and resolve the usual creator / household chain.
+        tz="UTC" if all_day else None,
     )
 
 
 def _as_datetime(value: date | datetime) -> datetime:
-    """Promote a bare :class:`date` to a UTC midnight datetime."""
+    """Promote a bare :class:`date` to a UTC midnight datetime.
+
+    A bare ``DATE`` DTEND is *exclusive* in RFC 5545 — a 10–12 Sep
+    all-day event carries ``DTEND;VALUE=DATE:20260913``, so the stored
+    end lands at ``00:00Z`` on the 13th. That is passed through
+    deliberately: the client derives the last inclusive moment from it.
+    """
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     return datetime.combine(value, time.min, tzinfo=timezone.utc)

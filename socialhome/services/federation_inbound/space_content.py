@@ -29,6 +29,7 @@ from ...domain.sticky import Sticky
 from ...domain.task import Task, TaskStatus
 from ...infrastructure.event_bus import EventBus
 from ...utils.datetime import parse_iso8601_lenient, parse_iso8601_optional
+from ...utils.timezones import coerce_tz
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
@@ -356,7 +357,14 @@ class SpaceContentInboundHandlers:
             cover_url=cover if isinstance(cover, str) and cover else None,
             location=location if isinstance(location, str) and location else None,
             # IANA wall-clock anchor. Old peers omit; default ``"UTC"``.
-            tz=str(p.get("tz") or "UTC"),
+            # Peer-supplied, so validated here: an unknown zone name
+            # makes ``Intl`` throw in the SPA and one bad row breaks
+            # the whole space calendar tab. Fail closed on the value,
+            # not the event — the row still lands, anchored to UTC.
+            tz=coerce_tz(
+                p.get("tz"),
+                context=(f"{event.event_type} from instance {event.from_instance}"),
+            ),
             # §23.15 opt-in feed mirror. Absent on an older sender →
             # default True so the bridge keeps the historic always-mirror
             # behaviour for events from un-upgraded peers.

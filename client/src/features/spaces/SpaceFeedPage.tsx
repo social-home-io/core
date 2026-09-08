@@ -9,11 +9,14 @@ import { instanceConfig } from '@/store/instance'
 import { loadHouseholdUsers } from '@/store/householdUsers'
 import { loadSpaceMembers } from '@/store/spaceMembers'
 import { useTitle } from '@/store/pageTitle'
+import { t } from '@/i18n/i18n'
 import {
-  advanceDate, dateRangeForMode, formatDayLabel, formatRangeHeading, groupEventsByDay,
+  advanceDate, dateRangeForMode, formatDayLabel, formatEventBounds, formatRangeHeading,
+  groupEventsByDay,
   type CalendarViewMode,
 } from '@/utils/calendar'
 import type { FeedPost, CalendarEvent } from '@/types'
+import { EventRowMeta } from '@/components/EventRowMeta'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { JoinRequestList } from '@/components/JoinRequestList'
@@ -124,6 +127,10 @@ const spacePages = signal<SpacePage[]>([])
 const spaceCalEvents = signal<CalendarEvent[]>([])
 const spaceCalCursor = signal(new Date())
 const spaceCalView = signal<CalendarViewMode>('month')
+/** Which agenda row is expanded, as ``"<dayKey>:<eventId>"``. Keyed
+ *  by the DAY CARD, not the event: a multi-day event renders one row
+ *  per covered day, so an event-id key would expand every one of them
+ *  at once. */
 const selectedSpaceEventId = signal<string | null>(null)
 const viewerRole = signal<
   'owner' | 'admin' | 'member' | 'subscriber' | undefined
@@ -580,7 +587,14 @@ export default function SpaceFeedPage() {
       )}
 
       {activeTab.value === 'calendar' && (() => {
-        const grouped = groupEventsByDay(spaceCalEvents.value)
+        // The visible range clamps the day expansion — the server's
+        // range query is overlap-based, so an event that started before
+        // the period comes back and would otherwise file an
+        // out-of-range day card.
+        const grouped = groupEventsByDay(
+          spaceCalEvents.value,
+          dateRangeForMode(spaceCalCursor.value, spaceCalView.value),
+        )
         // Keys are ``YYYY-MM-DD`` (see ``groupEventsByDay``) so a plain
         // lexicographic sort is chronological — no locale-fragile
         // ``new Date(key)`` round-trip required.
@@ -660,35 +674,44 @@ export default function SpaceFeedPage() {
                     <span class="sh-calendar-day-heading__rel">{friendly.relative}</span>
                   )}
                 </h3>
-                {grouped[dayKey].map(e => (
+                {grouped[dayKey].map(entry => {
+                  // ``e`` stays bound to the underlying event row;
+                  // ``entry`` only carries this day card's place in the
+                  // event's span.
+                  const e = entry.event
+                  const rowKey = `${dayKey}:${e.id}`
+                  // One call, two labels — the helper builds two Dates
+                  // and up to two Intl formatters per invocation.
+                  const bounds = formatEventBounds(e)
+                  return (
                   <div
-                    key={e.id}
-                    class="sh-event"
+                    key={rowKey}
+                    class={
+                      'sh-event'
+                      + (entry.isFirst ? '' : ' sh-event--continued')
+                      + (entry.isLast ? '' : ' sh-event--continues')
+                    }
                     onClick={() => {
                       selectedSpaceEventId.value =
-                        selectedSpaceEventId.value === e.id ? null : e.id
+                        selectedSpaceEventId.value === rowKey ? null : rowKey
                     }}
                   >
                     <div class="sh-event-header">
                       <strong>{e.summary}</strong>
-                      <time>
-                        {new Date(e.start).toLocaleTimeString(undefined, {
-                          hour: '2-digit', minute: '2-digit',
-                        })}
-                      </time>
-                      {e.all_day && <span class="sh-badge">All day</span>}
+                      <EventRowMeta entry={entry} />
                     </div>
-                    {selectedSpaceEventId.value === e.id && (
+                    {selectedSpaceEventId.value === rowKey && (
                       <div class="sh-event-detail">
                         {e.description && <p>{e.description}</p>}
                         <div class="sh-event-times">
-                          <span>Starts {new Date(e.start).toLocaleString()}</span>
-                          <span>Ends {new Date(e.end).toLocaleString()}</span>
+                          <span>{t('event.starts')} {bounds.starts}</span>
+                          <span>{t('event.ends')} {bounds.ends}</span>
                         </div>
                       </div>
                     )}
                   </div>
-                ))}
+                  )
+                })}
               </div>
               )
             })}

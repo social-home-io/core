@@ -326,6 +326,10 @@ async def _persist_imported_events(view, calendar_id, created_by, events):
                 description=ev.description,
                 rrule=ev.rrule,
                 location=ev.location,
+                # ``None`` for timed events → the service resolves the
+                # creator / household chain. All-day imports pin
+                # ``"UTC"`` (see ``_vevent_to_create``).
+                tz=ev.tz,
             )
         )
     return web.json_response(

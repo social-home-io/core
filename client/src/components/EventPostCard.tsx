@@ -38,6 +38,7 @@ import {
   rsvpCounts,
   type RsvpCounts,
 } from '@/store/calendar'
+import { lastInclusiveMoment, safeTimeZone } from '@/utils/calendar'
 import {
   detectBrowserTz,
   formatEventTime as formatTimeInTz,
@@ -124,7 +125,12 @@ export function EventPostCard({ eventId }: EventPostCardProps) {
         + (new Date(event.end).getTime() - new Date(event.start).getTime()),
       ).toISOString()
     : null
-  const eventTz = event.tz || 'UTC'
+  // ``safeTimeZone`` rather than a bare ``|| 'UTC'``: ``event.tz`` is
+  // whatever the authoring household / an ICS import / a peer put on
+  // the row, and every Intl call below throws ``RangeError`` on an
+  // unknown zone — one bad row must cost this card its tz precision,
+  // not blank it.
+  const eventTz = safeTimeZone(event.tz)
   const viewerTz = detectBrowserTz()
   const showTzHint = eventTz !== viewerTz && !event.all_day
 
@@ -281,12 +287,17 @@ function EventWhen({
     )
   }
 
-  const dateStr = formatDate(occurrenceStart, eventTz, allDay)
+  const dateStr = formatDate(occurrenceStart, eventTz)
   let timeStr = ''
   let viewerHint: string | null = null
   if (allDay) {
     if (occurrenceEnd) {
-      const endDate = formatDate(occurrenceEnd, eventTz, true)
+      // The end bound is EXCLUSIVE at the boundary — an ICS-imported
+      // all-day 10–12 Sep arrives as ``…-13T00:00:00Z``, and the
+      // composer's own rows sit at 23:59. Same rule the agenda row and
+      // the expanded detail apply (``utils/calendar``), so the three
+      // surfaces can't name different last days.
+      const endDate = formatDate(lastInclusiveMoment(occurrenceEnd), eventTz)
       if (endDate !== dateStr) {
         timeStr = `${dateStr} – ${endDate}`
       } else {
@@ -300,8 +311,18 @@ function EventWhen({
     const endFmt = occurrenceEnd
       ? formatTimeInTz(occurrenceEnd, eventTz, viewerTz)
       : null
+    // An overnight event (e.g. 10 PM – 2 AM) otherwise reads as ending
+    // earlier the same day — qualify the end time with its own date
+    // whenever it lands on a different calendar day than the start.
+    const endDateStr = occurrenceEnd
+      ? formatDate(occurrenceEnd, eventTz)
+      : null
+    const endLabel =
+      endFmt && endDateStr && endDateStr !== dateStr
+        ? `${endDateStr}, ${endFmt.primary}`
+        : endFmt?.primary
     timeStr = endFmt
-      ? `${dateStr}, ${startFmt.primary} – ${endFmt.primary}`
+      ? `${dateStr}, ${startFmt.primary} – ${endLabel}`
       : `${dateStr}, ${startFmt.primary}`
     if (showTzHint && endFmt) {
       viewerHint = `≈ ${endFmt.secondary?.replace(/^≈ /, '') ?? ''}`
@@ -337,11 +358,21 @@ function EventWhen({
 
 /** Render a YYYY-MM-DD-ish date label for the card headline,
  *  honouring the event's authored tz so the wall clock matches what
- *  the host typed. For all-day events the time portion is dropped. */
-function formatDate(iso: string, tz: string, allDay: boolean): string {
-  const d = new Date(iso)
+ *  the host typed.
+ *
+ *  All-day rows are anchored on the event tz too — NOT on UTC. The
+ *  composer stores them as 00:00 / 23:59 in the event's own tz (see
+ *  ``CalendarEventDialog``'s submit handler), so a Zurich household's
+ *  "1 May" is the instant ``2026-04-30T22:00Z``. Reading that in UTC
+ *  printed the day before, and made a single all-day event look like
+ *  a two-day range ("Apr 30 – May 1").
+ *
+ *  Takes an already-parsed ``Date`` too, so a caller that applied the
+ *  exclusive-end rule doesn't have to round-trip through ISO. */
+function formatDate(when: string | Date, tz: string): string {
+  const d = when instanceof Date ? when : new Date(when)
   return d.toLocaleDateString(undefined, {
-    timeZone: allDay ? 'UTC' : tz,
+    timeZone: tz,
     weekday: 'short',
     month: 'short',
     day: 'numeric',

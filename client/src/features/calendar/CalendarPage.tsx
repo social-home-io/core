@@ -13,6 +13,7 @@ import {
 import { CalendarFilterStrip } from '@/components/CalendarFilterStrip'
 import { CapacityStrip } from '@/components/CapacityStrip'
 import { EventOverflowMenu } from '@/components/EventOverflowMenu'
+import { EventRowMeta } from '@/components/EventRowMeta'
 import { LocationLink } from '@/components/LocationLink'
 import { HostApprovalQueue } from '@/components/HostApprovalQueue'
 import { ReminderPicker } from '@/components/ReminderPicker'
@@ -21,7 +22,7 @@ import { currentUser } from '@/store/auth'
 import { householdUsers, loadHouseholdUsers } from '@/store/householdUsers'
 import { events, rsvpCounts, myRsvpStatus, activeCalendarScope } from '@/store/calendar'
 import {
-  advanceDate, calendarHue, dateRangeForMode, formatDayLabel,
+  advanceDate, calendarHue, dateRangeForMode, formatDayLabel, formatEventBounds,
   formatRangeHeading, groupEventsByDay, groupSharedEvents, resolveCalendarColor,
   type CalendarViewMode,
 } from '@/utils/calendar'
@@ -74,7 +75,11 @@ const writeCalendarId = signal<string>('')
 const visibleCalendarIds = signal<Set<string>>(new Set())
 const calendars = signal<CalendarSummary[]>([])
 const currentDate = signal(new Date())
-const selectedEvent = signal<CalendarEvent | null>(null)
+/** Which agenda row is expanded, as ``"<dayKey>:<eventId>"``. Keyed
+ *  by the DAY CARD, not the event: a multi-day event renders one row
+ *  per covered day, so an event-id key would expand all of them at
+ *  once when the user clicks Saturday. */
+const selectedRow = signal<string | null>(null)
 const rsvpPending = signal<string | null>(null)
 
 async function loadEvents() {
@@ -266,7 +271,7 @@ export default function CalendarPage() {
     try {
       await api.delete(`/api/calendars/events/${eventId}`)
       showToast('Event deleted', 'success')
-      selectedEvent.value = null
+      selectedRow.value = null
       await loadEvents()
     } catch (err: unknown) {
       showToast(`Delete failed: ${(err as Error).message ?? err}`, 'error')
@@ -279,7 +284,7 @@ export default function CalendarPage() {
     // editable, including attendees, the RSVP toggle, and the "For:"
     // target calendar (so an event can be moved between members'
     // calendars without delete-and-recreate).
-    selectedEvent.value = null
+    selectedRow.value = null
     openEditEventDialog(
       {
         id: evt.id,
@@ -311,7 +316,13 @@ export default function CalendarPage() {
 
   if (loading.value) return <CalendarSkeleton />
 
-  const grouped = groupEventsByDay(events.value)
+  // Pass the visible range so the overlap-based server query (which
+  // legitimately returns an event that started before the period) can't
+  // file a stray out-of-range day card — an April card in a May view.
+  const grouped = groupEventsByDay(
+    events.value,
+    dateRangeForMode(currentDate.value, viewMode.value),
+  )
   // Keys are ``YYYY-MM-DD`` (see ``groupEventsByDay``) so a plain
   // lexicographic sort is chronological — no locale-fragile
   // ``new Date(key)`` round-trip required.
@@ -395,7 +406,13 @@ export default function CalendarPage() {
               <span class="sh-calendar-day-heading__rel">{friendly.relative}</span>
             )}
           </h3>
-          {grouped[dayKey].map(e => {
+          {grouped[dayKey].map(entry => {
+            // ``e`` stays bound to the underlying event row so
+            // everything below (owner chips, RSVP gating, edit /
+            // delete, reminders) reads unchanged; ``entry`` only
+            // carries this day card's place in the span.
+            const e = entry.event
+            const rowKey = `${dayKey}:${e.id}`
             // Owner byline / chips. Single attendee → one "You" /
             // "Bob" chip (the legacy shape). Multiple attendees (the
             // composer fanned the event out across N calendars) →
@@ -435,12 +452,19 @@ export default function CalendarPage() {
               }
             }
             return (
-            <div key={e.id} class="sh-event"
+            <div key={rowKey}
+                 class={
+                   'sh-event'
+                   + (entry.isFirst ? '' : ' sh-event--continued')
+                   + (entry.isLast ? '' : ' sh-event--continues')
+                 }
                  style={{ '--cal-hue': (() => {
                    const cal = calendars.value.find(c => c.id === e.calendar_id)
                    return cal ? resolveCalendarColor(cal) : calendarHue(e.calendar_id)
                  })() } as Record<string, string>}
-                 onClick={() => { selectedEvent.value = selectedEvent.value?.id === e.id ? null : e }}>
+                 onClick={() => {
+                   selectedRow.value = selectedRow.value === rowKey ? null : rowKey
+                 }}>
               <div class="sh-event-header">
                 {e.cover_url && (
                   <img
@@ -471,22 +495,22 @@ export default function CalendarPage() {
                     ))}
                   </span>
                 )}
-                <time>{new Date(e.start).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</time>
-                {e.all_day && <span class="sh-badge">All day</span>}
-                {e.location && (
-                  // Compact "where" hint on the collapsed row. The full
-                  // location + maps link only renders inside the expanded
-                  // detail to keep the row visually quiet.
-                  <span
-                    class="sh-event-row-locpin"
-                    aria-label={`Location: ${e.location}`}
-                    title={e.location}
-                  >
-                    📍
-                  </span>
-                )}
+                <EventRowMeta entry={entry}>
+                  {e.location && (
+                    // Compact "where" hint on the collapsed row. The full
+                    // location + maps link only renders inside the expanded
+                    // detail to keep the row visually quiet.
+                    <span
+                      class="sh-event-row-locpin"
+                      aria-label={`Location: ${e.location}`}
+                      title={e.location}
+                    >
+                      📍
+                    </span>
+                  )}
+                </EventRowMeta>
               </div>
-              {selectedEvent.value?.id === e.id && (() => {
+              {selectedRow.value === rowKey && (() => {
                 // RSVP visibility: only when explicitly enabled
                 // (``rsvp_enabled``) OR when there's a capacity cap
                 // (the legacy Phase C signal that an event needs
@@ -500,6 +524,9 @@ export default function CalendarPage() {
                 const showRsvp = (e.rsvp_enabled || isCapped)
                   && hasOthers
                   && (e.attendees ?? []).includes(myUid ?? '__none__')
+                // One call, two labels — the helper builds two Dates
+                // and up to two Intl formatters per invocation.
+                const bounds = formatEventBounds(e)
                 return (
                 <div class="sh-event-detail">
                   {e.location && (
@@ -512,8 +539,8 @@ export default function CalendarPage() {
                   )}
                   {e.description && <p>{e.description}</p>}
                   <div class="sh-event-times">
-                    <span>{t('event.starts')} {new Date(e.start).toLocaleString()}</span>
-                    <span>{t('event.ends')} {new Date(e.end).toLocaleString()}</span>
+                    <span>{t('event.starts')} {bounds.starts}</span>
+                    <span>{t('event.ends')} {bounds.ends}</span>
                   </div>
 
                   {showRsvp && (
