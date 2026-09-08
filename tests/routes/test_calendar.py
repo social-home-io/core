@@ -133,6 +133,27 @@ async def test_event_patch_attaches_client_event_uuid(client):
 # ─── Space-scoped calendar + RSVP (§23.7) ─────────────────────────────────
 
 
+def _future_seed(*, days: int = 1) -> datetime:
+    """A recurring-event seed whose whole window is still in the future.
+
+    Hard-coded calendar dates rot. ``CalendarService.set_rsvp`` enforces
+    the Phase E past-event lock — an RSVP to an occurrence that has
+    already ended is a write into the past and raises (422) — so a
+    fixture pinned to a literal date starts failing the day its last
+    occurrence passes. ``test_rsvp_recurring_per_occurrence`` was seeded
+    at 2026-08-03 with ``FREQ=WEEKLY;COUNT=4`` and duly went red once
+    2026-08-24 was behind us.
+
+    Seconds and microseconds are zeroed so ``seed.isoformat()``
+    round-trips through storage and ``expand_rrule`` byte-for-byte —
+    the tests compare ``occurrence_at`` strings.
+    """
+    return (datetime.now(timezone.utc) + timedelta(days=days)).replace(
+        second=0,
+        microsecond=0,
+    )
+
+
 async def _seed_space(client):
     db = client._db
     # ``feature_calendar`` schema default is 0 — the 0008 migration
@@ -447,7 +468,7 @@ async def test_rsvp_delete_non_member_403(client):
 async def test_rsvp_recurring_per_occurrence(client):
     """Two POSTs with different occurrence_at values create two rows."""
     await _seed_space(client)
-    seed = datetime(2026, 8, 3, 9, 0, tzinfo=timezone.utc)
+    seed = _future_seed()
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
@@ -499,7 +520,7 @@ async def test_rsvp_recurring_per_occurrence(client):
 async def test_rsvp_recurring_without_occurrence_422(client):
     """Recurring event RSVP without occurrence_at → 422."""
     await _seed_space(client)
-    seed = datetime(2026, 9, 7, 9, 0, tzinfo=timezone.utc)
+    seed = _future_seed()
     r = await client.post(
         "/api/spaces/sp-cal/calendar/events",
         json={
