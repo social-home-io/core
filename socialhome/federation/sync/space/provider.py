@@ -121,6 +121,13 @@ class SpaceSyncService:
                             space_id,
                             consecutive_failures,
                         )
+                        # Drop the session, or it holds one of the
+                        # requester's three active-session slots until the
+                        # 30-minute stale TTL — starving the re-BEGIN that
+                        # is the documented recovery. Recovery is usually
+                        # seconds away: a ROUTE_FOUND that missed the
+                        # discovery window warms the cache right after this.
+                        self._close_session(sync_id)
                         return
             sentinel = await self._builder.build_sentinel(
                 space_id=space_id,
@@ -147,6 +154,19 @@ class SpaceSyncService:
                 sync_id,
                 space_id,
             )
+            # Same reasoning as the abandon path above — a session whose
+            # stream died is garbage, and holding it blocks the retry.
+            self._close_session(sync_id)
+
+    def _close_session(self, sync_id: str) -> None:
+        """Best-effort teardown of a session whose stream is over."""
+        fed = self._federation
+        if fed is None:
+            return
+        try:
+            fed.close_sync_session(sync_id)
+        except Exception:  # pragma: no cover — teardown must never raise
+            log.exception("sync %s: closing the abandoned session failed", sync_id)
 
     async def _enqueue_catchup_media(
         self,

@@ -19,6 +19,7 @@ import base64
 import hashlib
 import hmac
 import logging
+import time
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -176,6 +177,7 @@ class FederationService:
         "_gfs_connection_service",
         "_user_repo",
         "_route_service",
+        "_last_mesh_begin_at",
         "_routed_handler",
         "_app_fed",
     )
@@ -235,6 +237,10 @@ class FederationService:
         # peer isn't directly CONFIRMED. Without them, the helper just
         # surfaces a failed DeliveryResult for non-CONFIRMED peers.
         self._route_service: RouteDiscoveryService | None = None
+        #: requester instance_id → monotonic time of its last mesh
+        #: SPACE_SYNC_BEGIN. Bounds how far back a cached route has to
+        #: reach before we treat it as pre-restart junk (#648).
+        self._last_mesh_begin_at: dict[str, float] = {}
         self._routed_handler: SpaceRoutedHandler | None = None
         # Social Home Apps federation bridge — set via :meth:`attach_apps`.
         # When unset, inbound APP_SESSION / APP_MESSAGE events are silently
@@ -1953,6 +1959,19 @@ class FederationService:
         if self._call_signaling is not None:
             await self._call_signaling.handle_federated_signal(event)
 
+    def close_sync_session(self, sync_id: str) -> None:
+        """Tear down an in-memory sync session by id. No-op if unknown.
+
+        Public so the provider can drop a stream it has abandoned. Leaving
+        the session open costs the *requester* one of its
+        ``MAX_ACTIVE_SESSIONS_PER_INSTANCE`` slots for the full stale-session
+        TTL (30 min) — and since a mesh requester recovers by re-issuing
+        BEGIN, a leaked session blocks the exact retry that would fix it
+        (#648).
+        """
+        if self._sync_manager is not None:
+            self._sync_manager.close_session(sync_id)
+
     async def _handle_space_sync_complete(self, event: FederationEvent) -> None:
         if self._sync_manager is not None:
             self._sync_manager.close_session(
@@ -2040,7 +2059,23 @@ class FederationService:
                 # probes afresh and the whole stream is sealed under a
                 # full-TTL key minted by the requester's current process.
                 # Bounded by the host's own 5/h ``check_sync_begin_rate``.
-                await self._route_service.invalidate(event.from_instance)
+                #
+                # Only routes minted before this requester's PREVIOUS begin
+                # are suspect. Invalidating unconditionally would discard a
+                # route we re-discovered for that previous begin — including
+                # one warmed by a ROUTE_FOUND that arrived just after the
+                # discovery window closed — and re-probe straight back into
+                # the same timeout, so a retrying requester could never make
+                # progress.
+                cutoff = self._last_mesh_begin_at.get(
+                    event.from_instance,
+                    time.monotonic(),
+                )
+                await self._route_service.invalidate_if_older_than(
+                    event.from_instance,
+                    cutoff=cutoff,
+                )
+                self._last_mesh_begin_at[event.from_instance] = time.monotonic()
             record = self._sync_manager.get_session(sync_id)
             if record is not None:
                 record.transport_mode = "https"
