@@ -338,17 +338,37 @@ class SpaceSyncService:
             # direct peer, so a bare ``send_event`` can't reach it — the
             # chunks must ride ``SPACE_ROUTED``. ``send_with_mesh_fallback``
             # picks the direct path internally for a confirmed peer and
-            # discovers a routed path otherwise. Fire-and-forget per chunk,
-            # matching the prior call.
-            await self._federation.send_with_mesh_fallback(
+            # discovers a routed path otherwise.
+            #
+            # ``.decode()`` matters: the routed path seals the inner
+            # payload for the target household and that sealing
+            # JSON-encodes it, so raw ``bytes`` can't be shipped over the
+            # mesh at all ("Object of type bytes is not JSON
+            # serializable"). The direct path tolerates bytes, which is
+            # why passing them through only ever broke the relayed
+            # topology — silently, since the failure surfaces as a
+            # warning inside the send. JSON is UTF-8 by definition so the
+            # decode is lossless, and ``parse_chunk`` takes ``bytes | str``.
+            result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=session.requester_instance_id,
                 event_type=FederationEventType.SPACE_SYNC_CHUNK,
                 payload={
                     "sync_id": session.sync_id,
-                    "chunk": serialise_chunk(envelope),
+                    "chunk": serialise_chunk(envelope).decode(),
                 },
                 space_id=session.space_id,
             )
+            # Don't swallow a broken stream. Every chunk failing is what
+            # left a mesh member with a space, a content key and media
+            # bytes but no post rows, and nothing said so.
+            if result is not None and not getattr(result, "ok", True):
+                log.warning(
+                    "sync %s: chunk ship to %s failed (%s) — the requester "
+                    "will be missing metadata",
+                    session.sync_id,
+                    session.requester_instance_id,
+                    getattr(result, "reason", None),
+                )
             return
         raise ValueError(
             f"Unknown transport_mode {mode!r} on session {session.sync_id}",
