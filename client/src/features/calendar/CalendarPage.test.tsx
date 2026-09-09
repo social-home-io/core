@@ -147,14 +147,126 @@ describe('CalendarPage', () => {
     }, { timeout: 2000 })
     expect(container.querySelectorAll('.sh-calendar-day-group').length).toBe(3)
 
-    // Clicking the middle day's row expands exactly that row — the
-    // expansion is keyed by ``dayKey:eventId``, not by event id, so the
-    // same event on the other two day cards stays collapsed.
+    // Activating the middle day's row header expands exactly that row —
+    // the expansion is keyed by ``dayKey:eventId``, not by event id, so
+    // the same event on the other two day cards stays collapsed. (The
+    // toggle lives on the header <button>, not the wrapper div, so the
+    // detail's Edit / Delete / RSVP controls aren't nested in it.)
     const rows = container.querySelectorAll('.sh-event')
-    fireEvent.click(rows[1])
+    fireEvent.click(rows[1].querySelector('.sh-event-header') as HTMLElement)
     await waitFor(() => {
       expect(container.querySelectorAll('.sh-event-detail').length).toBe(1)
     }, { timeout: 2000 })
     expect(rows[1].querySelector('.sh-event-detail')).toBeTruthy()
+  })
+
+  it('exposes each agenda row header as a native keyboard-operable button', async () => {
+    // Regression for the mouse-only agenda: the row was a bare
+    // ``<div onClick>`` with no role, no tabindex and no key handler,
+    // so a keyboard / screen-reader user could not open an event —
+    // and therefore could not reach Edit, Delete, RSVP or reminders.
+    // Asserting the tag + type is what actually buys operability: a
+    // native button gets Enter AND Space activation, focus and the
+    // right role from the platform. (Faking a ``keyDown`` would pass
+    // for the wrong reason — jsdom does not synthesize activation
+    // from keydown on a button.)
+    const now = new Date()
+    const iso = (day: number, hour: number) =>
+      new Date(now.getFullYear(), now.getMonth(), day, hour, 0, 0).toISOString()
+
+    const { api } = await import('@/api')
+    vi.mocked(api.get).mockImplementation(async (url: string) => {
+      if (url === '/api/calendars') {
+        return [{
+          id: 'cal-1', name: 'Family', owner_username: 'admin', color: null,
+        }]
+      }
+      if (url.startsWith('/api/calendars/cal-1/events')) {
+        return [{
+          id: 'ev1', calendar_id: 'cal-1', summary: 'Dentist',
+          description: null,
+          start: iso(9, 9), end: iso(9, 10),
+          all_day: false, rrule: null, capacity: null,
+          created_by: 'u1', attendees: ['u1'],
+          rsvp_enabled: false, location: null, cover_url: null,
+        }]
+      }
+      return []
+    })
+
+    const { render, waitFor, fireEvent } = await import('@testing-library/preact')
+    const mod = await import('./CalendarPage')
+    const { container } = render(<mod.default />)
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.sh-event-header').length).toBe(1)
+    }, { timeout: 2000 })
+
+    const header = container.querySelector('.sh-event-header') as HTMLButtonElement
+    expect(header.tagName).toBe('BUTTON')
+    expect(header.type).toBe('button')
+
+    // Collapsed disclosure announced as such, then expanded on activation.
+    expect(header.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(header)
+    await waitFor(() => {
+      expect(container.querySelectorAll('.sh-event-detail').length).toBe(1)
+    }, { timeout: 2000 })
+    expect(header.getAttribute('aria-expanded')).toBe('true')
+
+    // ``aria-controls`` has to point at the panel that actually appeared.
+    const detail = container.querySelector('.sh-event-detail') as HTMLElement
+    expect(detail.id).toBeTruthy()
+    expect(header.getAttribute('aria-controls')).toBe(detail.id)
+  })
+
+  it('does not open the detail from a click on the row wrapper outside the header button', async () => {
+    // The wrapper ``.sh-event`` div must no longer own the toggle —
+    // otherwise the detail (which holds Edit / Delete / RSVP /
+    // ReminderPicker) would sit inside the click target and the
+    // disclosure semantics would be a lie.
+    //
+    // NOTE the distinct event id + day: ``selectedRow`` is a
+    // module-level signal and the module is imported once per file, so
+    // reusing the previous test's ``dayKey:eventId`` would start this
+    // test already expanded.
+    const now = new Date()
+    const iso = (day: number, hour: number) =>
+      new Date(now.getFullYear(), now.getMonth(), day, hour, 0, 0).toISOString()
+
+    const { api } = await import('@/api')
+    vi.mocked(api.get).mockImplementation(async (url: string) => {
+      if (url === '/api/calendars') {
+        return [{
+          id: 'cal-1', name: 'Family', owner_username: 'admin', color: null,
+        }]
+      }
+      if (url.startsWith('/api/calendars/cal-1/events')) {
+        return [{
+          id: 'ev-wrapper', calendar_id: 'cal-1', summary: 'Dentist',
+          description: null,
+          start: iso(11, 9), end: iso(11, 10),
+          all_day: false, rrule: null, capacity: null,
+          created_by: 'u1', attendees: ['u1'],
+          rsvp_enabled: false, location: null, cover_url: null,
+        }]
+      }
+      return []
+    })
+
+    const { render, waitFor, fireEvent } = await import('@testing-library/preact')
+    const mod = await import('./CalendarPage')
+    const { container } = render(<mod.default />)
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.sh-event').length).toBe(1)
+    }, { timeout: 2000 })
+
+    const row = container.querySelector('.sh-event') as HTMLElement
+    fireEvent.click(row)
+    // Nothing async should have been kicked off, but give the signal a
+    // microtask-flush window so a regression can't hide behind timing.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(container.querySelectorAll('.sh-event-detail').length).toBe(0)
   })
 })

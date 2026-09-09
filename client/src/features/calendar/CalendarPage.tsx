@@ -413,6 +413,14 @@ export default function CalendarPage() {
             // carries this day card's place in the span.
             const e = entry.event
             const rowKey = `${dayKey}:${e.id}`
+            // Disclosure wiring: the header is a native <button> and the
+            // detail panel is its SIBLING (it holds Edit / Delete / RSVP /
+            // ReminderPicker — interactive elements nested inside a button
+            // would be invalid HTML and break keyboard traversal). The id
+            // is derived from the same parts as ``rowKey`` but kept a clean
+            // token (no ``:``) so it reads well in ``aria-controls``.
+            const isOpen = selectedRow.value === rowKey
+            const detailId = `sh-event-detail-${dayKey}-${e.id}`
             // Owner byline / chips. Single attendee → one "You" /
             // "Bob" chip (the legacy shape). Multiple attendees (the
             // composer fanned the event out across N calendars) →
@@ -461,11 +469,16 @@ export default function CalendarPage() {
                  style={{ '--cal-hue': (() => {
                    const cal = calendars.value.find(c => c.id === e.calendar_id)
                    return cal ? resolveCalendarColor(cal) : calendarHue(e.calendar_id)
-                 })() } as Record<string, string>}
-                 onClick={() => {
-                   selectedRow.value = selectedRow.value === rowKey ? null : rowKey
-                 }}>
-              <div class="sh-event-header">
+                 })() } as Record<string, string>}>
+              <button
+                type="button"
+                class="sh-event-header"
+                aria-expanded={isOpen}
+                aria-controls={detailId}
+                onClick={() => {
+                  selectedRow.value = isOpen ? null : rowKey
+                }}
+              >
                 {e.cover_url && (
                   <img
                     class="sh-event-cover-thumb"
@@ -509,8 +522,8 @@ export default function CalendarPage() {
                     </span>
                   )}
                 </EventRowMeta>
-              </div>
-              {selectedRow.value === rowKey && (() => {
+              </button>
+              {isOpen && (() => {
                 // RSVP visibility: only when explicitly enabled
                 // (``rsvp_enabled``) OR when there's a capacity cap
                 // (the legacy Phase C signal that an event needs
@@ -528,7 +541,7 @@ export default function CalendarPage() {
                 // and up to two Intl formatters per invocation.
                 const bounds = formatEventBounds(e)
                 return (
-                <div class="sh-event-detail">
+                <div class="sh-event-detail" id={detailId}>
                   {e.location && (
                     <p class="sh-event-location-row">
                       <LocationLink
