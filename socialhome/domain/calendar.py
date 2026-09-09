@@ -124,6 +124,12 @@ class CalendarEventCreate:
     rsvp_enabled: bool = False
     cover_url: str | None = None
     location: str | None = None
+    #: IANA wall-clock anchor for the parsed bounds, when the source
+    #: pins one. ``None`` = "no opinion", so the service resolves the
+    #: usual chain (creator tz → household tz → UTC). An all-day ICS
+    #: import sets ``"UTC"`` because a bare ``DATE`` is floating and
+    #: the parsed bounds are UTC-anchored by construction.
+    tz: str | None = None
 
 
 # Sentinel for ``CalendarEventUpdate.cover_url`` to distinguish

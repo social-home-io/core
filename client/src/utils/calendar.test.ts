@@ -1,10 +1,14 @@
 import { describe, it, expect } from 'vitest'
 import {
   formatDayLabel,
+  formatDayPortion,
+  formatEventBounds,
   formatMonthHeading,
   groupEventsByDay,
   groupSharedEvents,
+  lastInclusiveMoment,
   monthRange,
+  type DayEventEntry,
 } from './calendar'
 import type { CalendarEvent } from '@/types'
 
@@ -36,6 +40,10 @@ function sharedEvt(id: string, options: SharedEvtOpts = {}): CalendarEvent {
   } as unknown as CalendarEvent
 }
 
+/** Event ids of a day bucket, in bucket order. */
+const ids = (rows: DayEventEntry[] | undefined) =>
+  (rows ?? []).map(r => r.event.id)
+
 function evt(id: string, startISO: string): CalendarEvent {
   return {
     id,
@@ -51,6 +59,33 @@ function evt(id: string, startISO: string): CalendarEvent {
   } as unknown as CalendarEvent
 }
 
+interface SpanEvtOpts {
+  all_day?: boolean
+  tz?: string
+}
+/** Multi-day fixture — ``evt`` pins ``end === start`` so it can't
+ *  express a span. */
+function spanEvt(
+  id: string,
+  startISO: string,
+  endISO: string | undefined,
+  options: SpanEvtOpts = {},
+): CalendarEvent {
+  return {
+    id,
+    calendar_id: 'cal-1',
+    summary: id,
+    description: null,
+    start: startISO,
+    end: endISO,
+    all_day: false,
+    rrule: null,
+    capacity: null,
+    created_by: 'u-1',
+    ...options,
+  } as unknown as CalendarEvent
+}
+
 describe('calendar utils', () => {
   it('groups events by their local-date key, preserving order within a day', () => {
     const a = evt('a', '2026-04-30T08:00:00')
@@ -59,8 +94,8 @@ describe('calendar utils', () => {
     const groups = groupEventsByDay([a, b, c])
     const keys = Object.keys(groups)
     expect(keys.length).toBe(2)
-    expect(groups[keys[0]].map(e => e.id)).toEqual(['a', 'b'])
-    expect(groups[keys[1]].map(e => e.id)).toEqual(['c'])
+    expect(ids(groups[keys[0]])).toEqual(['a', 'b'])
+    expect(ids(groups[keys[1]])).toEqual(['c'])
   })
 
   it('emits locale-independent YYYY-MM-DD keys that sort chronologically', () => {
@@ -97,7 +132,7 @@ describe('calendar utils', () => {
     const groups = groupEventsByDay([afternoon, morning, noon])
     const keys = Object.keys(groups)
     expect(keys).toHaveLength(1)
-    expect(groups[keys[0]].map(e => e.id)).toEqual([
+    expect(ids(groups[keys[0]])).toEqual([
       'morning', 'noon', 'afternoon',
     ])
   })
@@ -312,5 +347,482 @@ describe('groupSharedEvents', () => {
     // shows both with their own chip, which is honest about the
     // mixed-version state.
     expect(out).toHaveLength(2)
+  })
+})
+
+describe('groupEventsByDay — multi-day spans', () => {
+  it('expands a timed 3-day span into one entry per covered day', () => {
+    // Local wall-clock strings (no ``Z``): timed rows bucket by the
+    // viewer's own components, so a UTC instant would land on a
+    // different local day at UTC±14 and make the test zone-dependent.
+    const trip = spanEvt('trip', '2026-05-01T14:00:00', '2026-05-03T10:00:00')
+    const groups = groupEventsByDay([trip])
+    expect(Object.keys(groups).sort()).toEqual([
+      '2026-05-01', '2026-05-02', '2026-05-03',
+    ])
+    const d1 = groups['2026-05-01'][0]
+    const d2 = groups['2026-05-02'][0]
+    const d3 = groups['2026-05-03'][0]
+    expect([d1.dayIndex, d2.dayIndex, d3.dayIndex]).toEqual([1, 2, 3])
+    expect([d1.dayCount, d2.dayCount, d3.dayCount]).toEqual([3, 3, 3])
+    expect([d1.isFirst, d2.isFirst, d3.isFirst]).toEqual([true, false, false])
+    expect([d1.isLast, d2.isLast, d3.isLast]).toEqual([false, false, true])
+    // The original row is handed through untouched — RSVP
+    // ``occurrence_at`` is keyed off ``event.start`` downstream.
+    expect(d3.event).toBe(trip)
+    expect(d3.event.start).toBe('2026-05-01T14:00:00')
+  })
+
+  it('anchors an all-day span in UTC so no off-by-one day appears', () => {
+    // The fixture carries no ``tz``, so the documented ``'UTC'``
+    // default applies — the same fallback legacy rows were computed
+    // in. Zone-independent by construction.
+    const holiday = spanEvt(
+      'holiday', '2026-05-01T00:00:00Z', '2026-05-03T23:59:00Z',
+      { all_day: true },
+    )
+    const groups = groupEventsByDay([holiday])
+    expect(Object.keys(groups).sort()).toEqual([
+      '2026-05-01', '2026-05-02', '2026-05-03',
+    ])
+    expect(groups['2026-05-03'][0].dayCount).toBe(3)
+  })
+
+  it('treats an exact-midnight end as exclusive (22:00 → 00:00 = one day)', () => {
+    // Local wall clock (no ``Z``) — the midnight rule is applied in
+    // the same zone the key was read in, which for a timed row is the
+    // viewer's. A ``Z`` instant would be local 02:00 in Zurich and the
+    // branch under test would never run.
+    const late = spanEvt('late', '2026-05-01T22:00:00', '2026-05-02T00:00:00')
+    const groups = groupEventsByDay([late])
+    expect(Object.keys(groups)).toEqual(['2026-05-01'])
+    expect(groups['2026-05-01'][0].dayCount).toBe(1)
+    expect(groups['2026-05-01'][0].isLast).toBe(true)
+  })
+
+  it('clamps emitted keys to the visible window but keeps the true span', () => {
+    // The server range query is overlap-based, so an event starting
+    // before the visible month comes back — without the clamp it filed
+    // a stray April card into a May view.
+    const long = spanEvt('long', '2026-04-28T09:00:00', '2026-05-03T17:00:00')
+    const visibleRange = monthRange(new Date(2026, 4, 15))
+    const groups = groupEventsByDay([long], visibleRange)
+    expect(Object.keys(groups).sort()).toEqual([
+      '2026-05-01', '2026-05-02', '2026-05-03',
+    ])
+    const may1 = groups['2026-05-01'][0]
+    expect(may1.dayIndex).toBe(4)
+    expect(may1.dayCount).toBe(6)
+    expect(may1.isFirst).toBe(false)
+    expect(groups['2026-05-03'][0].dayIndex).toBe(6)
+    expect(groups['2026-05-03'][0].isLast).toBe(true)
+  })
+
+  it('leaves ordinary same-day events as a single first-and-last entry', () => {
+    const lunch = spanEvt('lunch', '2026-05-14T11:00:00', '2026-05-14T12:00:00')
+    const groups = groupEventsByDay([lunch])
+    expect(Object.keys(groups)).toEqual(['2026-05-14'])
+    const row = groups['2026-05-14'][0]
+    expect(row.dayCount).toBe(1)
+    expect(row.dayIndex).toBe(1)
+    expect(row.isFirst && row.isLast).toBe(true)
+  })
+
+  it('emits one key per calendar day across a spring-forward weekend', () => {
+    // A TIMED span over the EU spring-forward night (29 March 2026),
+    // expressed as local wall clock so both parsing and the day keys
+    // use the viewer's components. The walk is calendar arithmetic on
+    // the ``YYYY-MM-DD`` keys — a date string carries no clock, so the
+    // 23-hour local day can neither skip nor duplicate a key. Holds in
+    // every zone (zones without a transition simply see three ordinary
+    // days).
+    const weekend = spanEvt(
+      'weekend', '2026-03-28T20:00:00', '2026-03-30T09:00:00',
+    )
+    const groups = groupEventsByDay([weekend])
+    expect(Object.keys(groups).sort()).toEqual([
+      '2026-03-28', '2026-03-29', '2026-03-30',
+    ])
+    expect(groups['2026-03-30'][0].dayCount).toBe(3)
+  })
+
+  it('files cards inside the range for a span longer than the 366-day cap', () => {
+    // The walk STARTS at max(startKey, rangeLo): a runaway multi-year
+    // row whose visible days sit beyond day 366 must still land in the
+    // visible month, not fall through to the (out-of-range) start-day
+    // fallback the cap used to force.
+    const runaway = spanEvt('runaway', '2024-01-01T09:00:00', '2027-01-01T09:00:00')
+    const may = monthRange(new Date(2026, 4, 15))
+    const groups = groupEventsByDay([runaway], may)
+    const keys = Object.keys(groups).sort()
+    expect(keys[0]).toBe('2026-05-01')
+    expect(keys[keys.length - 1]).toBe('2026-05-31')
+    expect(keys).toHaveLength(31)
+    // dayIndex / dayCount stay the TRUE span.
+    expect(groups['2026-05-01'][0].dayIndex).toBe(852)
+    expect(groups['2026-05-01'][0].dayCount).toBe(1097)
+    expect(groups['2026-05-01'][0].isFirst).toBe(false)
+  })
+
+  it('never lets the window clamp swallow an event with no overlap', () => {
+    // Fail-soft: the visible window and the rows held in the
+    // ``events`` signal can legitimately disagree — WS frames accrete
+    // rows for other periods into the same cache, and a fetch can land
+    // after the user navigated away. A hard clamp would silently drop
+    // them, so a zero-overlap event falls back to its own start day.
+    const stray = spanEvt('stray', '2026-05-14T10:00:00', '2026-05-14T11:00:00')
+    const september = monthRange(new Date(2026, 8, 15))
+    const groups = groupEventsByDay([stray], september)
+    expect(Object.keys(groups)).toEqual(['2026-05-14'])
+    const row = groups['2026-05-14'][0]
+    expect(row.dayIndex).toBe(1)
+    expect(row.dayCount).toBe(1)
+  })
+
+  it('falls back to the start day for a multi-day event outside the window', () => {
+    const away = spanEvt('away', '2026-05-14T10:00:00', '2026-05-16T11:00:00')
+    const september = monthRange(new Date(2026, 8, 15))
+    const groups = groupEventsByDay([away], september)
+    expect(Object.keys(groups)).toEqual(['2026-05-14'])
+    expect(groups['2026-05-14'][0].dayIndex).toBe(1)
+    expect(groups['2026-05-14'][0].dayCount).toBe(3)
+    expect(groups['2026-05-14'][0].isFirst).toBe(true)
+  })
+
+  it('renders continuation entries above the events that start that day', () => {
+    // A running multi-day event is standing context for the day; the
+    // things that actually start today come after it, still sorted by
+    // start time.
+    const running = spanEvt('running', '2026-05-01T09:00:00', '2026-05-03T09:00:00')
+    const afternoon = evt('afternoon', '2026-05-02T15:00:00')
+    const morning = evt('morning', '2026-05-02T08:00:00')
+    const groups = groupEventsByDay([afternoon, morning, running])
+    expect(ids(groups['2026-05-02'])).toEqual([
+      'running', 'morning', 'afternoon',
+    ])
+    expect(ids(groups['2026-05-01'])).toEqual(['running'])
+  })
+
+  it('falls back to a single day when end precedes start', () => {
+    const broken = spanEvt('broken', '2026-05-10T10:00:00', '2026-05-08T10:00:00')
+    const groups = groupEventsByDay([broken])
+    expect(Object.keys(groups)).toEqual(['2026-05-10'])
+    expect(groups['2026-05-10'][0].dayCount).toBe(1)
+  })
+
+  it('falls back to a single day when end is missing or unparseable', () => {
+    const noEnd = spanEvt('no-end', '2026-05-10T10:00:00', undefined)
+    const junkEnd = spanEvt('junk-end', '2026-05-11T10:00:00', 'not-a-date')
+    const groups = groupEventsByDay([noEnd, junkEnd])
+    expect(Object.keys(groups).sort()).toEqual(['2026-05-10', '2026-05-11'])
+    expect(groups['2026-05-10'][0].dayCount).toBe(1)
+    expect(groups['2026-05-11'][0].dayCount).toBe(1)
+  })
+
+  it('skips an event with an unparseable start rather than bucketing NaN', () => {
+    const junk = spanEvt('junk', 'not-a-date', '2026-05-02T10:00:00')
+    const ok = evt('ok', '2026-05-02T10:00:00')
+    const groups = groupEventsByDay([junk, ok])
+    expect(Object.keys(groups)).toEqual(['2026-05-02'])
+    expect(ids(groups['2026-05-02'])).toEqual(['ok'])
+  })
+})
+
+describe('groupEventsByDay — all-day events anchor on the event tz', () => {
+  it('keeps a Zurich single-day all-day event in exactly one bucket', () => {
+    // Stored shape, verified against the composer
+    // (``CalendarEventDialog.tsx`` writes 00:00 / 23:59 in the event's
+    // own tz): an all-day "1 May 2026" authored in Europe/Zurich is on
+    // the wire as 2026-04-30T22:00:00Z → 2026-05-01T21:59:00Z. Read by
+    // UTC components that is [2026-04-30, 2026-05-01] — the "Day 1 of
+    // 2" regression this round fixes.
+    const holiday = spanEvt(
+      'may-day', '2026-04-30T22:00:00Z', '2026-05-01T21:59:00Z',
+      { all_day: true, tz: 'Europe/Zurich' },
+    )
+    const groups = groupEventsByDay([holiday])
+    expect(Object.keys(groups)).toEqual(['2026-05-01'])
+    expect(groups['2026-05-01'][0].dayCount).toBe(1)
+  })
+
+  it('expands a Zurich all-day 3-day span into its own three days', () => {
+    const trip = spanEvt(
+      'trip', '2026-04-30T22:00:00Z', '2026-05-03T21:59:00Z',
+      { all_day: true, tz: 'Europe/Zurich' },
+    )
+    const groups = groupEventsByDay([trip])
+    expect(Object.keys(groups).sort()).toEqual([
+      '2026-05-01', '2026-05-02', '2026-05-03',
+    ])
+    expect(groups['2026-05-03'][0].dayCount).toBe(3)
+  })
+
+  it('anchors a west-of-UTC all-day event on its own zone', () => {
+    const la = spanEvt(
+      'la', '2026-05-01T07:00:00Z', '2026-05-02T06:59:00Z',
+      { all_day: true, tz: 'America/Los_Angeles' },
+    )
+    const groups = groupEventsByDay([la])
+    expect(Object.keys(groups)).toEqual(['2026-05-01'])
+    expect(groups['2026-05-01'][0].dayCount).toBe(1)
+  })
+
+  it('clamps an all-day span to the VIEWER calendar days on screen', () => {
+    // The bucket keyspace is calendar-day STRINGS and ``formatDayLabel``
+    // renders each key as a viewer calendar day — so "is this day on
+    // screen" is a question about viewer days no matter which zone
+    // produced the key. Deriving the clamp bounds in the EVENT's zone
+    // landed a day off for every viewer west of it: a Zurich-authored
+    // all-day 30 May – 2 Jun leaked a ``2026-06-01`` card into a May
+    // view at UTC and at America/Los_Angeles.
+    const trip = spanEvt(
+      'trip', '2026-05-29T22:00:00Z', '2026-06-02T21:59:00Z',
+      { all_day: true, tz: 'Europe/Zurich' },
+    )
+    const may = monthRange(new Date(2026, 4, 15))
+    const groups = groupEventsByDay([trip], may)
+    expect(Object.keys(groups).sort()).toEqual(['2026-05-30', '2026-05-31'])
+    // The clamp never rewrites the span itself.
+    expect(groups['2026-05-30'][0].dayIndex).toBe(1)
+    expect(groups['2026-05-30'][0].dayCount).toBe(4)
+    expect(groups['2026-05-31'][0].dayIndex).toBe(2)
+  })
+
+  it('falls back to UTC for an all-day row with no tz', () => {
+    const legacy = spanEvt(
+      'legacy', '2026-05-01T00:00:00Z', '2026-05-01T23:59:00Z',
+      { all_day: true },
+    )
+    const groups = groupEventsByDay([legacy])
+    expect(Object.keys(groups)).toEqual(['2026-05-01'])
+    expect(groups['2026-05-01'][0].dayCount).toBe(1)
+  })
+})
+
+describe('formatDayPortion', () => {
+  /** Same range shape the production helper builds — derived rather
+   *  than hard-coded so the expectation follows the runtime default
+   *  locale ("1 – 3 May" on en-GB, "May 1 – 3" on en-US). */
+  function range(startISO: string, endISO: string, tz?: string): string {
+    const fmt = new Intl.DateTimeFormat(undefined, {
+      day: 'numeric', month: 'short', timeZone: tz,
+    })
+    // ``-1 ms`` = the last inclusive moment, mirroring the helper.
+    return fmt.formatRange(
+      new Date(startISO), new Date(new Date(endISO).getTime() - 1),
+    )
+  }
+  const hhmm = (iso: string) =>
+    new Date(iso).toLocaleTimeString(undefined, {
+      hour: '2-digit', minute: '2-digit',
+    })
+
+  it('labels each day of a timed 3-day span with its own portion + badge', () => {
+    const trip = spanEvt('trip', '2026-05-01T14:00:00', '2026-05-03T10:00:00')
+    const groups = groupEventsByDay([trip])
+    const d1 = formatDayPortion(groups['2026-05-01'][0])
+    const d2 = formatDayPortion(groups['2026-05-02'][0])
+    const d3 = formatDayPortion(groups['2026-05-03'][0])
+    expect(d1.when).toContain('from ')
+    expect(d1.when).toContain(hhmm('2026-05-01T14:00:00'))
+    expect(d1.badge).toBe('Starts')
+    expect(d2.when).toContain('all day')
+    expect(d2.badge).toBe('Day 2 of 3')
+    expect(d3.when).toContain('until ')
+    expect(d3.when).toContain(hhmm('2026-05-03T10:00:00'))
+    expect(d3.badge).toBe('Ends')
+  })
+
+  it('reports the same compact date range on every day of the span', () => {
+    const trip = spanEvt('trip', '2026-05-01T14:00:00', '2026-05-03T10:00:00')
+    const groups = groupEventsByDay([trip])
+    const expected = range('2026-05-01T14:00:00', '2026-05-03T10:00:00')
+    for (const key of ['2026-05-01', '2026-05-02', '2026-05-03']) {
+      expect(formatDayPortion(groups[key][0]).when).toContain(expected)
+    }
+  })
+
+  it('labels an ordinary same-day timed event with just its start time', () => {
+    const lunch = spanEvt('lunch', '2026-05-14T11:00:00', '2026-05-14T12:00:00')
+    const row = groupEventsByDay([lunch])['2026-05-14'][0]
+    const out = formatDayPortion(row)
+    expect(out.when).toBe(hhmm('2026-05-14T11:00:00'))
+    expect(out.badge).toBe(null)
+    expect(out.aria).toBe(null)
+  })
+
+  it('emits an empty label for a single-day all-day event', () => {
+    // The row already carries an "All day" badge — a ``00:00`` clock
+    // next to it is noise, so the page can drop the <time> element.
+    const holiday = spanEvt(
+      'holiday', '2026-04-30T22:00:00Z', '2026-05-01T21:59:00Z',
+      { all_day: true, tz: 'Europe/Zurich' },
+    )
+    const row = groupEventsByDay([holiday])['2026-05-01'][0]
+    const out = formatDayPortion(row)
+    expect(out.when).toBe('')
+    expect(out.badge).toBe(null)
+  })
+
+  it('anchors a multi-day all-day range on the event tz, not the viewer', () => {
+    // Regression guard: authored as 1–3 May in Europe/Zurich, on the
+    // wire as 2026-04-30T22:00Z → 2026-05-03T21:59Z. Rendering the
+    // range in the viewer's zone (or UTC) would name 30 April.
+    const trip = spanEvt(
+      'trip', '2026-04-30T22:00:00Z', '2026-05-03T21:59:00Z',
+      { all_day: true, tz: 'Europe/Zurich' },
+    )
+    const groups = groupEventsByDay([trip])
+    const expected = range(
+      '2026-04-30T22:00:00Z', '2026-05-03T21:59:00Z', 'Europe/Zurich',
+    )
+    for (const key of ['2026-05-01', '2026-05-02', '2026-05-03']) {
+      const out = formatDayPortion(groups[key][0])
+      expect(out.when).toContain('all day')
+      expect(out.when).toContain(expected)
+      // "30" is April's day number — must not appear anywhere.
+      expect(out.when).not.toContain('30')
+    }
+  })
+
+  it('keeps a midnight end off the following day in the range label', () => {
+    // ``dayCount`` is 2 (midnight end is exclusive), so the range must
+    // stop on the 2nd — the ``-1 ms`` effective end.
+    const late = spanEvt('late', '2026-05-01T22:00:00', '2026-05-03T00:00:00')
+    const groups = groupEventsByDay([late])
+    const row = groups['2026-05-02'][0]
+    expect(row.dayCount).toBe(2)
+    expect(formatDayPortion(row).when).toContain(
+      range('2026-05-01T22:00:00', '2026-05-03T00:00:00'),
+    )
+    expect(formatDayPortion(row).when).not.toContain('3 ')
+  })
+
+  it('describes the row position in the span for screen readers', () => {
+    const trip = spanEvt('trip', '2026-05-01T14:00:00', '2026-05-03T10:00:00')
+    const mid = groupEventsByDay([trip])['2026-05-02'][0]
+    const out = formatDayPortion(mid)
+    expect(out.aria).toContain('day 2 of 3')
+  })
+})
+
+describe('formatEventBounds', () => {
+  it('renders an all-day span as dates in the event tz, with no clock', () => {
+    // Stored shape (``components/CalendarEventDialog.tsx``): an all-day
+    // event is written as 00:00 / 23:59 in the event's OWN tz, so a
+    // 10–12 September authored in Europe/Zurich is on the wire as
+    // 2026-09-09T22:00Z → 2026-09-12T21:59Z. Reading those components
+    // in the viewer's zone (or UTC) names the 9th and quotes a wall
+    // clock the all-day event never had.
+    const trip = spanEvt(
+      'trip', '2026-09-09T22:00:00Z', '2026-09-12T21:59:00Z',
+      { all_day: true, tz: 'Europe/Zurich' },
+    )
+    const out = formatEventBounds(trip)
+    expect(out.starts).toContain('10')
+    expect(out.starts).not.toContain('9,')
+    expect(out.ends).toContain('12')
+    // Dates only — an all-day event has no wall clock to quote.
+    expect(out.starts).not.toContain(':')
+    expect(out.ends).not.toContain(':')
+  })
+
+  it('treats an exclusive 00:00 all-day end as the previous day', () => {
+    // ICS-imported all-day events carry an exclusive midnight end
+    // bound — same ``-1 ms`` rule ``formatDayPortion`` uses.
+    const ics = spanEvt(
+      'ics', '2026-09-10T00:00:00Z', '2026-09-13T00:00:00Z',
+      { all_day: true, tz: 'UTC' },
+    )
+    const out = formatEventBounds(ics)
+    expect(out.starts).toContain('10')
+    expect(out.ends).toContain('12')
+    expect(out.ends).not.toContain('13')
+  })
+
+  it('keeps a timed event on the viewer-zone toLocaleString output', () => {
+    const meeting = spanEvt(
+      'meeting', '2026-09-10T14:00:00Z', '2026-09-10T15:00:00Z',
+    )
+    const out = formatEventBounds(meeting)
+    expect(out.starts).toBe(new Date('2026-09-10T14:00:00Z').toLocaleString())
+    expect(out.ends).toBe(new Date('2026-09-10T15:00:00Z').toLocaleString())
+  })
+
+  it('falls back to the start bound when end is missing or unparseable', () => {
+    const noEnd = spanEvt('no-end', '2026-09-10T14:00:00Z', undefined)
+    const junk = spanEvt('junk-end', '2026-09-10T14:00:00Z', 'not-a-date')
+    for (const e of [noEnd, junk]) {
+      const out = formatEventBounds(e)
+      expect(out.starts).toBe(new Date('2026-09-10T14:00:00Z').toLocaleString())
+      expect(out.ends).toBe(out.starts)
+      expect(out.ends).not.toContain('Invalid')
+    }
+  })
+
+  it('returns the raw string for an unparseable start rather than throwing', () => {
+    const out = formatEventBounds(spanEvt('junk', 'not-a-date', undefined))
+    expect(out.starts).toBe('not-a-date')
+    expect(out.ends).toBe('not-a-date')
+  })
+})
+
+describe('lastInclusiveMoment', () => {
+  it('is one millisecond before the exclusive end bound', () => {
+    const d = lastInclusiveMoment('2026-09-13T00:00:00Z')
+    expect(d.getTime()).toBe(new Date('2026-09-13T00:00:00Z').getTime() - 1)
+  })
+
+  it('fails soft on an unparseable end instead of throwing', () => {
+    expect(() => lastInclusiveMoment('not-a-date')).not.toThrow()
+    expect(Number.isNaN(lastInclusiveMoment('not-a-date').getTime())).toBe(true)
+  })
+})
+
+describe('a malformed event.tz degrades one row, never the page', () => {
+  // ``Intl`` throws ``RangeError: Invalid time zone specified`` on an
+  // unknown zone. A peer (or a bad ICS import) can put anything in
+  // ``event.tz``, and one such row used to take out the whole agenda
+  // via the App-level ErrorBoundary. Every tz-consuming helper falls
+  // back to UTC instead.
+  const bad = () => spanEvt(
+    'bad-tz', '2026-05-01T00:00:00Z', '2026-05-03T23:59:00Z',
+    { all_day: true, tz: 'Foo/Bar' },
+  )
+
+  it('still buckets an all-day row carrying an unknown zone', () => {
+    const groups = groupEventsByDay([bad()])
+    expect(Object.keys(groups).sort()).toEqual([
+      '2026-05-01', '2026-05-02', '2026-05-03',
+    ])
+    expect(groups['2026-05-02'][0].dayCount).toBe(3)
+  })
+
+  it('still labels the day portion of a row with an unknown zone', () => {
+    const row = groupEventsByDay([bad()])['2026-05-02'][0]
+    const out = formatDayPortion(row)
+    expect(out.badge).toBe('Day 2 of 3')
+    expect(out.when).toContain('all day')
+    expect(out.when).not.toContain('Invalid')
+  })
+
+  it('still renders the expanded bounds of a row with an unknown zone', () => {
+    const out = formatEventBounds(bad())
+    expect(out.starts).toContain('1')
+    expect(out.ends).toContain('3')
+    expect(out.starts).not.toContain('Invalid')
+    expect(out.ends).not.toContain('Invalid')
+  })
+
+  it('still buckets a TIMED row carrying an unknown zone', () => {
+    // Timed rows bucket in the viewer's zone, so ``tz`` is only a
+    // hazard if a helper reads it — this pins that it doesn't.
+    const timed = spanEvt(
+      'bad-tz-timed', '2026-05-01T09:00:00', '2026-05-02T09:00:00',
+      { tz: 'Foo/Bar' },
+    )
+    const groups = groupEventsByDay([timed])
+    expect(Object.keys(groups).sort()).toEqual(['2026-05-01', '2026-05-02'])
+    expect(formatDayPortion(groups['2026-05-01'][0]).badge).toBe('Starts')
   })
 })

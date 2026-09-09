@@ -25,6 +25,7 @@ from ...domain.calendar import CalendarEvent, CalendarRSVP
 from ...domain.federation import FederationEventType
 from ...infrastructure.event_bus import EventBus
 from ...utils.datetime import parse_iso8601_optional
+from ...utils.timezones import coerce_tz
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
@@ -111,6 +112,21 @@ class PersonalCalendarInboundHandlers:
         ):
             log.debug("PERSONAL_CALENDAR_EVENT_* missing required field")
             return
+        # IANA wall-clock anchor — additive over the wire. The
+        # organiser's tz is what locally-rendered times anchor to; the
+        # SPA still annotates "≈ HH:MM your time" for the recipient.
+        # Old peers omit the field; default ``"UTC"``.
+        #
+        # Peer-supplied, so validated here: an unknown zone name makes
+        # ``Intl`` throw in the SPA and one bad row breaks the whole
+        # household calendar. Fail closed on the value, not the event —
+        # the row still lands, anchored to UTC. Resolved once per
+        # envelope (it doesn't vary by recipient) so a bogus zone from a
+        # misbehaving peer logs one warning, not one per attendee.
+        event_tz = coerce_tz(
+            p.get("tz"),
+            context=f"{event.event_type} from instance {event.from_instance}",
+        )
         # Each recipient gets their own mirror row — the row id is
         # deterministic from (remote_instance, remote_event, recipient)
         # so a redelivered envelope (network retry) collapses onto the
@@ -133,11 +149,6 @@ class PersonalCalendarInboundHandlers:
                     recipient_user_id,
                 )
                 continue
-            # IANA wall-clock anchor — additive over the wire. The
-            # organiser's tz is what locally-rendered times anchor to;
-            # the SPA still annotates "≈ HH:MM your time" for the
-            # recipient. Old peers omit the field; default ``"UTC"``.
-            event_tz = str(p.get("tz") or "UTC")
             # Client-stamped grouping uuid (issue #327). Optional on
             # the wire — sub-version peers omit the field; the SPA's
             # content-key fallback covers those rows. When present

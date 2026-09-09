@@ -1313,3 +1313,37 @@ async def test_schedule_created_not_registered_without_poll_repo(bus, repos):
     h.attach_to(fed)
     types = {t for t, _ in fed._event_registry.registered}
     assert FederationEventType.SPACE_SCHEDULE_CREATED not in types
+
+
+# ─── peer-supplied tz is validated at the trust boundary ───────────────
+
+
+@pytest.mark.parametrize(
+    ("wire_tz", "expected"),
+    [
+        ("Foo/Bar", "UTC"),
+        ("Europe/Zurich", "Europe/Zurich"),
+    ],
+)
+async def test_calendar_saved_validates_peer_tz(repos, handlers, wire_tz, expected):
+    """An unknown IANA name from a peer must not reach the SPA (``Intl``
+    raises ``RangeError`` on it, breaking the whole space calendar tab).
+    Fail closed on the value, not the event — the row still lands,
+    anchored to ``"UTC"``."""
+    await handlers._on_calendar_saved(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+            {
+                "id": "e-tz",
+                "calendar_id": "cal-1",
+                "summary": "Zone test",
+                "created_by": "u-remote",
+                "start": "2026-09-10T18:00:00+00:00",
+                "end": "2026-09-10T20:00:00+00:00",
+                "tz": wire_tz,
+            },
+            space_id="sp-1",
+        )
+    )
+    _space_id, ev = repos["calendar"]._events["e-tz"]
+    assert ev.tz == expected
