@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
 
 from typing import Any
@@ -16,8 +18,8 @@ from socialhome.federation.sync.space.exporter import (
     SENTINEL_RESOURCE,
     parse_chunk,
 )
+from socialhome.federation.sync.space import provider as provider_mod
 from socialhome.federation.sync.space.provider import (
-    MAX_CONSECUTIVE_CHUNK_FAILURES,
     SpaceSyncService,
 )
 
@@ -511,7 +513,9 @@ async def test_stream_initial_catchup_logic_bug_propagates(encoder, caplog):
 # ─── #648: don't push into a broken path forever ──────────────────────
 
 
-async def test_stream_initial_abandons_after_consecutive_chunk_failures(provider):
+async def test_stream_initial_abandons_after_consecutive_chunk_failures(
+    provider, caplog
+):
     """A stream whose chunks keep failing is abandoned, not completed.
 
     Each attempt on the mesh path costs a BFS plus a 3-hop signed round,
@@ -528,13 +532,25 @@ async def test_stream_initial_abandons_after_consecutive_chunk_failures(provider
     federation.send_with_mesh_fallback = AsyncMock(
         return_value=SimpleNamespace(ok=False, error="no_route"),
     )
+    # ``close_sync_session`` is sync in production; an AsyncMock attribute
+    # would hand back an un-awaited coroutine.
+    federation.close_sync_session = MagicMock()
     provider.attach_federation(federation)
 
-    await provider.stream_initial(session)
+    # Drop the budget to 1 so the abort provably fires BEFORE the stream
+    # would have ended on its own — the fixture emits only ~3 sends, so
+    # asserting await_count == MAX_CONSECUTIVE_CHUNK_FAILURES passed even
+    # when the abort never triggered.
+    with (
+        patch.object(provider_mod, "MAX_CONSECUTIVE_CHUNK_FAILURES", 1),
+        caplog.at_level(logging.WARNING, logger="socialhome"),
+    ):
+        await provider.stream_initial(session)
 
-    assert (
-        federation.send_with_mesh_fallback.await_count == MAX_CONSECUTIVE_CHUNK_FAILURES
-    ), "kept streaming past the failure budget"
+    assert federation.send_with_mesh_fallback.await_count == 1, (
+        "kept streaming past the failure budget"
+    )
+    assert "abandoning stream" in caplog.text
 
 
 async def test_stream_initial_failure_budget_resets_on_success(provider):
@@ -572,3 +588,55 @@ async def test_stream_initial_failure_budget_resets_on_success(provider):
     assert federation.send_with_mesh_fallback.await_count == expected, (
         "an isolated failure aborted a stream that was recovering"
     )
+
+
+async def test_abandoned_stream_closes_its_session(provider):
+    """Giving up on a stream must not leak the session.
+
+    A held session costs the *requester* one of its three active-session
+    slots for the 30-minute stale TTL — and a mesh requester recovers by
+    re-issuing BEGIN, so a leaked session blocks precisely the retry that
+    would fix it. That is what kept `sync-https-fallback` red even once
+    the route came back seconds later (#648).
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    session = _FakeSession()
+    session.rtc = None
+    session.transport_mode = "https"
+
+    federation = AsyncMock()
+    federation.send_with_mesh_fallback = AsyncMock(
+        return_value=SimpleNamespace(ok=False, error="no_route"),
+    )
+    federation.close_sync_session = MagicMock()
+    provider.attach_federation(federation)
+
+    with patch.object(provider_mod, "MAX_CONSECUTIVE_CHUNK_FAILURES", 1):
+        await provider.stream_initial(session)
+
+    federation.close_sync_session.assert_called_once_with(session.sync_id)
+
+
+async def test_successful_stream_leaves_the_session_alone(provider):
+    """A stream that completes must NOT tear its own session down.
+
+    The requester closes it on the sentinel; closing it here would race
+    that and drop late chunks.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    session = _FakeSession()
+    session.rtc = None
+    session.transport_mode = "https"
+
+    federation = AsyncMock()
+    federation.send_with_mesh_fallback = AsyncMock(
+        return_value=SimpleNamespace(ok=True, error=None),
+    )
+    federation.close_sync_session = MagicMock()
+    provider.attach_federation(federation)
+
+    await provider.stream_initial(session)
+
+    federation.close_sync_session.assert_not_called()

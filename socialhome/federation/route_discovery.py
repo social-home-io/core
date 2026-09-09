@@ -202,6 +202,7 @@ class RouteDiscoveryService:
         "_target_eph_state",
         "_inflight",
         "_negative_until",
+        "_origin_requests",
     )
 
     def __init__(
@@ -250,6 +251,13 @@ class RouteDiscoveryService:
         #: target_instance_id → monotonic deadline before which we won't
         #: re-probe after a discovery that found no route.
         self._negative_until: dict[str, float] = {}
+        #: ``request_id`` → ``(target, expires_at)`` for probes WE
+        #: originated. Outlives ``_pending`` (which is popped the moment
+        #: the wait resolves) so a ROUTE_FOUND that arrives after the hard
+        #: cap can still be attributed to its target and warmed into the
+        #: route cache instead of being thrown away — see
+        #: :meth:`_on_route_found`.
+        self._origin_requests: dict[str, tuple[str, float]] = {}
         #: target_instance_id → cached path (origin side).
         self._route_cache: dict[str, _CachedRoute] = {}
         #: target-eph-pub-b64 → ``(target_eph_priv_b64, expires_at)``.
@@ -391,6 +399,14 @@ class RouteDiscoveryService:
         # own instance so a probe that loops back to us (via a peer
         # that has us in its neighbour list) is dropped silently.
         self._seen_requests[request_id] = now + self._seen_ttl_s
+        # Remember what we asked for, for longer than we're willing to
+        # wait. A slow first round trip (a peer that just rebooted pays a
+        # DTLS handshake + STUN) routinely overshoots the hard cap below,
+        # and the answer is still perfectly good when it lands.
+        self._origin_requests[request_id] = (
+            target_instance_id,
+            now + self._seen_ttl_s,
+        )
 
         sent = 0
         for peer_inst in confirmed:
@@ -447,17 +463,40 @@ class RouteDiscoveryService:
             )
             return None
         path, target_eph_pk_b64 = result
+        # Anchored on the moment the probe was SENT, not on resolution. The
+        # target minted its ephemeral strictly after our probe left, so
+        # probe-start anchoring removes the discovery-latency term exactly
+        # and keeps our window inside the target's (#648).
+        self._cache_route(
+            target_instance_id=target_instance_id,
+            path=path,
+            target_eph_pk=target_eph_pk_b64,
+            anchored_at=now,
+        )
+        return result
+
+    def _cache_route(
+        self,
+        *,
+        target_instance_id: str,
+        path: list[str],
+        target_eph_pk: str,
+        anchored_at: float,
+    ) -> None:
+        """Store a discovered route, anchored on ``anchored_at``.
+
+        ``anchored_at`` must never be later than the moment the target
+        minted the ephemeral, or our window could outlive its private half
+        (#648). Probe-send time satisfies that for a normal resolve;
+        arrival time satisfies it for a late answer (strictly after mint,
+        so the window only shrinks).
+        """
         self._route_cache[target_instance_id] = _CachedRoute(
             path=list(path),
-            target_eph_pk=target_eph_pk_b64,
-            # Anchored on the moment the probe was SENT, not on resolution.
-            # The target minted its ephemeral strictly after our probe left,
-            # so probe-start anchoring removes the discovery-latency term
-            # exactly and keeps our window inside the target's (#648).
-            expires_at=now + self._cache_ttl_s,
+            target_eph_pk=target_eph_pk,
+            expires_at=anchored_at + self._cache_ttl_s,
         )
         self._negative_until.pop(target_instance_id, None)
-        return result
 
     async def invalidate(self, target_instance_id: str) -> None:
         """Drop the cached route for ``target_instance_id``.
@@ -472,6 +511,36 @@ class RouteDiscoveryService:
         # "this path is known-bad, go look again" signal, and leaving the
         # cooldown in place would swallow the very next probe.
         self._negative_until.pop(target_instance_id, None)
+
+    async def invalidate_if_older_than(
+        self,
+        target_instance_id: str,
+        *,
+        cutoff: float,
+    ) -> bool:
+        """Drop the cached route only if it was minted before ``cutoff``.
+
+        A blanket :meth:`invalidate` on every inbound BEGIN is wrong once a
+        requester retries: the first BEGIN forces a re-probe, a late
+        ROUTE_FOUND warms the cache moments later, and the *next* BEGIN
+        would throw that fresh route away and re-probe into the same
+        timeout — forever. The requester restarts once, so only a route
+        minted before its previous BEGIN can be stale.
+
+        Returns True when the entry was dropped. Monotonic clock, same
+        basis as ``_CachedRoute.expires_at``.
+        """
+        cached = self._route_cache.get(target_instance_id)
+        if cached is None:
+            return False
+        minted_at = cached.expires_at - self._cache_ttl_s
+        if minted_at >= cutoff:
+            # Minted after the cutoff, so it came from a probe this
+            # requester's current process answered. Keep it.
+            return False
+        self._route_cache.pop(target_instance_id, None)
+        self._negative_until.pop(target_instance_id, None)
+        return True
 
     def lookup_target_eph_priv(self, pub_b64: str) -> str | None:
         """Return the cached target-ephemeral *private* half for ``pub_b64``.
@@ -657,6 +726,44 @@ class RouteDiscoveryService:
             if len(pending.responses) == 1:
                 # First response — start the collection window.
                 asyncio.create_task(self._resolve_after_window(request_id))
+            return
+
+        # Origin path, late answer: ``_pending`` is popped the instant the
+        # wait resolves, so a ROUTE_FOUND that lands after the hard cap
+        # (``discovery_timeout_s * 2``, 4 s by default) finds no pending
+        # entry and used to be dropped on the floor. That is exactly what a
+        # just-rebooted peer produces — its first round trip pays a DTLS
+        # handshake and a STUN probe — and it left the origin with no route
+        # while the answer it needed sat in its inbox. The response is still
+        # valid, so verify it and warm the cache; the caller's next attempt
+        # (next chunk, or the requester's next BEGIN) then resolves from
+        # cache instead of re-flooding and timing out again.
+        originated = self._origin_requests.get(request_id)
+        if originated is not None:
+            target, _expires = originated
+            if self._verify_route_found(
+                request_id=request_id,
+                target=target,
+                path=path,
+                target_eph_pk=target_eph_pk,
+                target_identity_pk=target_identity_pk,
+                target_eph_sig=target_eph_sig,
+                from_instance=event.from_instance,
+            ):
+                # Anchored on ARRIVAL, which is strictly after the target
+                # minted the key, so our window still closes before its
+                # private half expires.
+                self._cache_route(
+                    target_instance_id=target,
+                    path=path,
+                    target_eph_pk=target_eph_pk,
+                    anchored_at=now,
+                )
+                log.info(
+                    "route_discovery: late ROUTE_FOUND for %s cached"
+                    " (arrived after the discovery window closed)",
+                    target,
+                )
             return
 
         # Relay path: forward to the caller we cached when the
@@ -906,6 +1013,11 @@ class RouteDiscoveryService:
         if self._target_eph_state:
             self._target_eph_state = cap_by_expiry(
                 {k: v for k, v in self._target_eph_state.items() if v[1] > now},
+                key=lambda kv: kv[1][1],
+            )
+        if self._origin_requests:
+            self._origin_requests = cap_by_expiry(
+                {k: v for k, v in self._origin_requests.items() if v[1] > now},
                 key=lambda kv: kv[1][1],
             )
         if self._negative_until:

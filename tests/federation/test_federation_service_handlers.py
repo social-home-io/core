@@ -55,6 +55,7 @@ def svc():
     # before streaming, and rejections go out over the mesh fallback.
     s._route_service = None
     s._routed_handler = None
+    s._last_mesh_begin_at = {}
     s._own_instance_id = "self-iid"
     s._own_identity_seed = b"\x00" * 32
     s._ice_servers = []
@@ -1212,7 +1213,7 @@ async def test_mesh_begin_invalidates_cached_route_before_streaming(svc):
     svc._space_sync_service = MagicMock()
     svc._space_sync_service.stream_initial = AsyncMock()
     svc._route_service = MagicMock()
-    svc._route_service.invalidate = AsyncMock()
+    svc._route_service.invalidate_if_older_than = AsyncMock(return_value=True)
 
     with patch.object(
         FederationService,
@@ -1229,7 +1230,8 @@ async def test_mesh_begin_invalidates_cached_route_before_streaming(svc):
         )
         await asyncio.sleep(0)
 
-    svc._route_service.invalidate.assert_awaited_once_with("peer-1")
+    svc._route_service.invalidate_if_older_than.assert_awaited_once()
+    assert svc._route_service.invalidate_if_older_than.await_args.args[0] == "peer-1"
     svc._space_sync_service.stream_initial.assert_awaited_once_with(record)
 
 
@@ -1252,7 +1254,7 @@ async def test_confirmed_peer_begin_leaves_route_cache_alone(svc):
     svc._space_sync_service = MagicMock()
     svc._space_sync_service.stream_initial = AsyncMock()
     svc._route_service = MagicMock()
-    svc._route_service.invalidate = AsyncMock()
+    svc._route_service.invalidate_if_older_than = AsyncMock(return_value=True)
 
     with patch.object(
         FederationService,
@@ -1271,7 +1273,7 @@ async def test_confirmed_peer_begin_leaves_route_cache_alone(svc):
         )
         await asyncio.sleep(0)
 
-    svc._route_service.invalidate.assert_not_awaited()
+    svc._route_service.invalidate_if_older_than.assert_not_awaited()
     svc._space_sync_service.stream_initial.assert_awaited_once_with(record)
 
 

@@ -1451,3 +1451,164 @@ async def test_prune_expired_bounds_the_negative_cooldown_dict():
 
     assert "stale-target" not in svc._negative_until
     assert "live-target" in svc._negative_until
+
+
+# ── #648: a ROUTE_FOUND that arrives late is still worth having ───────
+
+
+async def test_late_route_found_warms_the_cache():
+    """An answer that lands after the hard cap is cached, not discarded.
+
+    ``_pending`` is popped the instant the wait resolves, so a
+    ROUTE_FOUND arriving after ``discovery_timeout_s * 2`` used to fall
+    through to the relay branch, find no cached caller, and vanish. That
+    is precisely what a just-rebooted peer produces — its first round trip
+    pays a DTLS handshake plus a STUN probe — leaving the origin with no
+    route while a perfectly good answer sat in its inbox, and the chunk
+    stream abandoned after three instant failures.
+    """
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]}, discovery_timeout_s=0.01)
+    origin = nodes["a"].service
+    target_id = nodes["b"].instance_id
+
+    # Drive a discovery that is guaranteed to time out: the probes go
+    # nowhere, so nothing answers inside the window.
+    nodes["a"].fed.peers.clear()
+    assert await origin.discover_route(target_id) is None
+    assert target_id not in origin._route_cache
+
+    # The request must still be attributable after the wait gave up.
+    req_ids = list(origin._origin_requests)
+    assert req_ids, "origin forgot what it asked for"
+    request_id = req_ids[0]
+    assert origin._origin_requests[request_id][0] == target_id
+
+    # Now the answer finally lands, correctly signed by the target.
+    eph_pk = nodes["b"].service._generate_target_eph(time.monotonic())
+    payload = _signed_route_found_payload(
+        request_id=request_id,
+        path=[nodes["a"].instance_id, target_id],
+        target_eph_pk_b64=eph_pk,
+        signer_seed=nodes["b"].fed.own_identity_seed,
+        signer_pk=nodes["b"].fed.own_identity_pk,
+    )
+    await origin._on_route_found(
+        FederationEvent(
+            msg_id="late-1",
+            event_type=FederationEventType.SPACE_ROUTE_FOUND,
+            from_instance=target_id,
+            to_instance=nodes["a"].instance_id,
+            timestamp="2026-05-22T00:00:00Z",
+            payload=payload,
+        )
+    )
+
+    cached = origin._route_cache.get(target_id)
+    assert cached is not None, "late ROUTE_FOUND was thrown away"
+    assert cached.target_eph_pk == payload["target_eph_pk"]
+    # And the cooldown the timeout installed is lifted, so the next call
+    # resolves from cache rather than being suppressed.
+    assert target_id not in origin._negative_until
+    assert await origin.discover_route(target_id) == (
+        [nodes["a"].instance_id, target_id],
+        payload["target_eph_pk"],
+    )
+
+
+async def test_late_route_found_still_verifies_the_signature():
+    """The late path must not become a hole in the v_21 binding.
+
+    A confirmed relay that forges a ROUTE_FOUND with its own ephemeral
+    key would hand itself our plaintext. Arriving late is not a reason to
+    skip the check.
+    """
+    nodes = _build_mesh(
+        {"a": ["b"], "b": ["a"], "c": ["a"]},
+        discovery_timeout_s=0.01,
+    )
+    origin = nodes["a"].service
+    target_id = nodes["b"].instance_id
+    nodes["a"].fed.peers.clear()
+    assert await origin.discover_route(target_id) is None
+    request_id = next(iter(origin._origin_requests))
+
+    # Signed by C, but claiming a path that ends at B.
+    eph_pk = nodes["c"].service._generate_target_eph(time.monotonic())
+    forged = _signed_route_found_payload(
+        request_id=request_id,
+        path=[nodes["a"].instance_id, target_id],
+        target_eph_pk_b64=eph_pk,
+        signer_seed=nodes["c"].fed.own_identity_seed,
+        signer_pk=nodes["c"].fed.own_identity_pk,
+    )
+    await origin._on_route_found(
+        FederationEvent(
+            msg_id="late-forged",
+            event_type=FederationEventType.SPACE_ROUTE_FOUND,
+            from_instance=target_id,
+            to_instance=nodes["a"].instance_id,
+            timestamp="2026-05-22T00:00:00Z",
+            payload=forged,
+        )
+    )
+
+    assert target_id not in origin._route_cache
+
+
+async def test_origin_requests_are_pruned():
+    """The attribution map is bounded like every other TTL dict."""
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]})
+    svc = nodes["a"].service
+    svc._origin_requests = {
+        "stale": ("target-x", time.monotonic() - 1.0),
+        "live": ("target-y", time.monotonic() + 60.0),
+    }
+    svc._prune_expired(time.monotonic())
+    assert "stale" not in svc._origin_requests
+    assert "live" in svc._origin_requests
+
+
+async def test_invalidate_if_older_than_keeps_a_freshly_minted_route():
+    """A route minted after the cutoff survives; an older one doesn't.
+
+    The host drops its cached route when a mesh requester sends BEGIN,
+    because that route may predate the requester's restart. But once the
+    requester retries, invalidating unconditionally would throw away the
+    route re-discovered for the previous BEGIN — including one warmed by a
+    late ROUTE_FOUND — and re-probe into the same timeout forever (#648).
+    """
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]})
+    svc = nodes["a"].service
+    target = nodes["b"].instance_id
+
+    assert await svc.discover_route(target) is not None
+    minted_at = svc._route_cache[target].expires_at - svc._cache_ttl_s
+
+    # Cutoff before the route was minted → it is current, keep it.
+    assert await svc.invalidate_if_older_than(target, cutoff=minted_at - 1.0) is False
+    assert target in svc._route_cache
+
+    # Cutoff after it was minted → it predates the event, drop it.
+    assert await svc.invalidate_if_older_than(target, cutoff=minted_at + 1.0) is True
+    assert target not in svc._route_cache
+
+
+async def test_invalidate_if_older_than_is_a_noop_without_a_cached_route():
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]})
+    svc = nodes["a"].service
+    assert (
+        await svc.invalidate_if_older_than("nobody", cutoff=time.monotonic()) is False
+    )
+
+
+async def test_invalidate_if_older_than_lifts_the_cooldown_when_it_drops():
+    """Dropping a stale route must also clear its negative cooldown."""
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]})
+    svc = nodes["a"].service
+    target = nodes["b"].instance_id
+    assert await svc.discover_route(target) is not None
+    svc._negative_until[target] = time.monotonic() + 60.0
+
+    minted_at = svc._route_cache[target].expires_at - svc._cache_ttl_s
+    assert await svc.invalidate_if_older_than(target, cutoff=minted_at + 1.0) is True
+    assert target not in svc._negative_until
