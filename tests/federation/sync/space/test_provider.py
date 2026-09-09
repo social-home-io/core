@@ -12,6 +12,7 @@ from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.sync.space.exporter import (
     ChunkBuilder,
     SENTINEL_RESOURCE,
+    parse_chunk,
 )
 from socialhome.federation.sync.space.provider import SpaceSyncService
 
@@ -133,6 +134,43 @@ async def test_stream_initial_uses_https_when_session_marked(provider):
     assert first_call.kwargs["space_id"] == session.space_id
     assert first_call.kwargs["payload"]["sync_id"] == session.sync_id
     assert first_call.kwargs["payload"]["chunk"]  # serialised chunk body
+
+
+async def test_stream_initial_https_chunk_payload_is_json_serialisable(provider):
+    """A mesh-routed chunk MUST survive JSON encoding.
+
+    ``send_with_mesh_fallback`` seals the inner payload for the target
+    household, and that sealing JSON-encodes it — so a payload holding
+    raw ``bytes`` cannot be shipped over the mesh at all. The provider
+    used to pass ``serialise_chunk()`` straight through, which returns
+    ``bytes``: every chunk to a mesh-only member died with "Object of
+    type bytes is not JSON serializable", the failure was swallowed
+    (``_send`` ignores the send result), and the member ended up with a
+    space, a content key and media bytes but zero post rows.
+
+    The direct path tolerates bytes, which is why this only ever broke
+    the relayed topology. ``parse_chunk`` accepts ``bytes | str``, so
+    shipping UTF-8 text is lossless for the receiver.
+    """
+    import json
+    from unittest.mock import AsyncMock
+
+    session = _FakeSession()
+    session.rtc = None
+    session.transport_mode = "https"
+
+    federation = AsyncMock()
+    provider.attach_federation(federation)
+
+    await provider.stream_initial(session)
+
+    assert federation.send_with_mesh_fallback.await_count >= 3
+    for call in federation.send_with_mesh_fallback.await_args_list:
+        payload = call.kwargs["payload"]
+        # The actual failure mode: json.dumps raises TypeError on bytes.
+        json.dumps(payload)
+        # And the ferried body must still parse back into a chunk.
+        assert parse_chunk(payload["chunk"])["resource"]
 
 
 async def test_stream_initial_https_requires_attached_federation(provider):
