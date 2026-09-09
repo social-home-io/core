@@ -937,36 +937,52 @@ def cmd_relay_pair() -> None:
             "target_display_name": d["name"],
         },
     )
-    _must("auto-pair-via(a→d)", s, _resp, ok=(202,))
-    print(f"  a → request_via(b, d): 202 {_resp}")
+    # A previous run of this step may have completed the pairing and then
+    # failed on a later assertion; the request endpoint answers 422
+    # "already paired" from then on. Treat that as "the pair we want is
+    # already in place" and fall through to the assertions, so re-running
+    # the step after a flake is actually possible (it was not: every
+    # retry died here).
+    already_paired = s == 422 and "already paired" in str(_resp)
+    if already_paired:
+        print("  a ↔ d already trust-relay paired — re-checking assertions")
+    else:
+        _must("auto-pair-via(a→d)", s, _resp, ok=(202,))
+        print(f"  a → request_via(b, d): 202 {_resp}")
 
     # Give the federated request a beat to land in d's inbox. Polling
     # interval is 2 s — the auto-pair-requests endpoint is rate-limited
     # so faster polls trip 429.
-    deadline = time.monotonic() + 30.0
-    request_id: str | None = None
-    while time.monotonic() < deadline:
-        s, inbox = _request(
-            f"http://127.0.0.1:{d['port']}/api/pairing/auto-pair-requests",
-            token=d["token"],
-        )
-        if s == 200:
-            items = inbox if isinstance(inbox, list) else (inbox.get("items") or [])
-            if items:
-                request_id = items[0]["request_id"]
-                break
-        time.sleep(2.0)
-    if request_id is None:
-        raise SystemExit("d's auto-pair inbox stayed empty after 30s")
+    # Skipped on a re-run: with the pair already in place there is no
+    # pending request to approve, and this poll would just burn 30 s and
+    # then fail.
+    if not already_paired:
+        deadline = time.monotonic() + 30.0
+        request_id: str | None = None
+        while time.monotonic() < deadline:
+            s, inbox = _request(
+                f"http://127.0.0.1:{d['port']}/api/pairing/auto-pair-requests",
+                token=d["token"],
+            )
+            if s == 200:
+                items = (
+                    inbox if isinstance(inbox, list) else (inbox.get("items") or [])
+                )
+                if items:
+                    request_id = items[0]["request_id"]
+                    break
+            time.sleep(2.0)
+        if request_id is None:
+            raise SystemExit("d's auto-pair inbox stayed empty after 30s")
 
-    s, _resp = _request(
-        f"http://127.0.0.1:{d['port']}/api/pairing/auto-pair-requests/"
-        f"{request_id}/approve",
-        token=d["token"],
-        method="POST",
-    )
-    _must("auto-pair approve(d)", s, _resp)
-    print(f"  d approves request {request_id}")
+        s, _resp = _request(
+            f"http://127.0.0.1:{d['port']}/api/pairing/auto-pair-requests/"
+            f"{request_id}/approve",
+            token=d["token"],
+            method="POST",
+        )
+        _must("auto-pair approve(d)", s, _resp)
+        print(f"  d approves request {request_id}")
 
     # Settle: both the confirmed-status flip AND the on-pair
     # ``INSTANCE_CAPABILITIES_UPDATED`` need a moment to land. The
@@ -977,27 +993,57 @@ def cmd_relay_pair() -> None:
     # checking, so we hit each token's ``/api/pairing/*`` bucket only
     # once for this step (the bucket is 5 calls per 60 s; we've
     # already spent ~2 on the request/approve round).
-    time.sleep(10)
     state["relay_pair_ran"] = True
     _save(state)
+    # ``INSTANCE_CAPABILITIES_UPDATED`` rides the outbox on the 5/10/20 s
+    # backoff described above, so the peer's ``proto_version`` appears
+    # some seconds AFTER the pair confirms. This used to be one read
+    # after a flat ``time.sleep(10)`` — a fixed wait landing mid-backoff,
+    # which failed the step intermittently with "stuck at
+    # proto_version=1" while the capabilities event was merely in
+    # flight.
+    #
+    # Retry instead of sleeping longer, but retry SPARINGLY: every
+    # ``/api/pairing/*`` path — reads included — shares one bucket of
+    # 5 requests / 60 s (``build_rate_limit_middleware`` in
+    # ``socialhome/app.py``), and this step has already spent calls on
+    # auto-pair-via / the inbox poll / approve. Three widely-spaced
+    # reads land at ~25 s, ~45 s and ~65 s after the approve, which
+    # covers the whole 5/10/20 backoff while staying inside the bucket.
+    # A 429 means the bucket is empty, not that federation failed, so
+    # it is skipped rather than raised on.
     for label, peer in (("a", d["instance_id"]), ("d", a["instance_id"])):
         info = state["instances"][label]
-        s, conns = _request(
-            f"http://127.0.0.1:{info['port']}/api/pairing/connections",
-            token=info["token"],
-        )
-        _must(f"connections({label})", s, conns)
-        match = [c for c in conns if c["instance_id"] == peer]
-        if not match or match[0]["status"] != "confirmed":
-            raise SystemExit(
-                f"{label} → {peer[:8]}: expected confirmed, got {match!r}",
+        pv = 1
+        confirmed = False
+        last: object = None
+        for delay in (25.0, 20.0, 20.0):
+            time.sleep(delay)
+            s, conns = _request(
+                f"http://127.0.0.1:{info['port']}/api/pairing/connections",
+                token=info["token"],
             )
-        pv = int(match[0].get("proto_version") or 1)
+            if s == 429:
+                print(f"  connections({label}): 429 — bucket empty, retrying")
+                continue
+            _must(f"connections({label})", s, conns)
+            match = [c for c in conns if c["instance_id"] == peer]
+            last = match
+            if match and match[0]["status"] == "confirmed":
+                confirmed = True
+                pv = int(match[0].get("proto_version") or 1)
+                if pv >= 2:
+                    break
+        if not confirmed:
+            raise SystemExit(
+                f"{label} → {peer[:8]}: expected confirmed, got {last!r}",
+            )
         if pv < 2:
             raise SystemExit(
                 f"{label} → {peer[:8]}: relay-paired peer stuck at "
-                f"proto_version={pv} — INSTANCE_CAPABILITIES_UPDATED "
-                "never landed on the trust-relay path",
+                f"proto_version={pv} after ~65 s — "
+                "INSTANCE_CAPABILITIES_UPDATED never landed on the "
+                "trust-relay path",
             )
         print(f"  {label} sees {peer[:8]} at proto_version={pv} (trust-relay) ✓")
     print("relay-pair: ok (a ↔ d confirmed via b)")
