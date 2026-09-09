@@ -44,7 +44,15 @@ dependencies = [
     # buffer was above HWM at the moment the peer disconnected would
     # park on ``_buffered_low_event`` forever
     # (social-home-io/aiolibdatachannel#13).
-    "aiolibdatachannel>=2026.5.22",
+    # 2026.9.8 releases the GIL while registering libdatachannel
+    # callbacks (social-home-io/aiolibdatachannel#20). Registration
+    # happens on the event-loop thread for every ``PeerConnection`` /
+    # ``DataChannel`` we open, so holding the GIL across that FFI call
+    # stalled every other coroutine for its duration — the same class of
+    # "never block the loop" rule this project applies to its own code.
+    # It also vendors libdatachannel v0.24.5
+    # (social-home-io/aiolibdatachannel#21).
+    "aiolibdatachannel>=2026.9.8",
 ]
 
 [project.optional-dependencies]
