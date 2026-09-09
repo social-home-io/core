@@ -819,6 +819,78 @@ describe('DmThreadPage — older-history staleness', () => {
     }
   })
 
+  it('a send that resolves after a thread switch does not touch the new thread', async () => {
+    // The send paths were flagged as sharing loadOlder's race. They do
+    // not: every mutation is keyed on ``tempId`` or the server-assigned
+    // id, neither of which can exist in the other thread's list, so a
+    // late resolution is a content no-op. This test pins that
+    // invariant — if someone reworks the reconcile to touch the list
+    // positionally (the way loadOlder's prepend did), it fails.
+    const restore = stubScrollMetrics({
+      scrollTop: 0, scrollHeight: 600, clientHeight: 600,
+    })
+    try {
+      let releaseSend: (v: unknown) => void = () => {}
+      const slowSend = new Promise<unknown>(res => { releaseSend = res })
+      apiGet.mockImplementation(async (url: string) => {
+        if (url === '/api/conversations') return [convRow('conv-a'), convRow('conv-b')]
+        if (url.startsWith('/api/conversations/conv-a/messages')) {
+          return url.includes('before=') ? [] : [msgRow('a-1', 'THREAD-A body 0')]
+        }
+        if (url.startsWith('/api/conversations/conv-b/messages')) {
+          return url.includes('before=')
+            ? []
+            : [msgRow('msg-b', 'THREAD-B: the thread the user is looking at')]
+        }
+        if (url.endsWith('/members')) return memberRows
+        return []
+      })
+      // The send POST hangs until we release it.
+      apiPost.mockImplementation(async (url: string) => {
+        if (url === '/api/conversations/conv-a/messages') return slowSend
+        return {}
+      })
+
+      routeState.convId = 'conv-a'
+      const { render, waitFor, fireEvent } = await import('@testing-library/preact')
+      const { default: DmThreadPage } = await import('./DmThreadPage')
+      const Page = asPage(DmThreadPage)
+      const { container, rerender } = render(<Page tick={1} />)
+      await waitFor(() => {
+        expect(container.textContent ?? '').toContain('THREAD-A body 0')
+      }, { timeout: RENDER_WAIT })
+
+      // Send from thread A — the optimistic bubble appears at once and
+      // the POST hangs.
+      const ta = container.querySelector('textarea')
+      const form = container.querySelector('form.sh-composer')
+      expect(ta).not.toBeNull(); expect(form).not.toBeNull()
+      ;(ta as HTMLTextAreaElement).value = 'SENT-FROM-A'
+      fireEvent.input(ta as HTMLTextAreaElement)
+      fireEvent.submit(form as HTMLFormElement)
+      await waitFor(() => {
+        expect(container.textContent ?? '').toContain('SENT-FROM-A')
+      }, { timeout: RENDER_WAIT })
+
+      // Switch to B, then let A's send resolve with a real id.
+      routeState.convId = 'conv-b'
+      rerender(<Page tick={2} />)
+      await waitFor(() => {
+        expect(container.textContent ?? '').toContain('THREAD-B')
+      }, { timeout: RENDER_WAIT })
+      releaseSend({ id: 'real-a-id' })
+      await new Promise(r => setTimeout(r, 80))
+
+      // B is untouched: its own message is still there and nothing
+      // from A leaked in.
+      expect(container.textContent ?? '').toContain('THREAD-B')
+      expect(container.textContent ?? '').not.toContain('SENT-FROM-A')
+      expect(container.querySelectorAll('[data-msg-id]').length).toBe(1)
+    } finally {
+      restore()
+    }
+  })
+
   it('does not prepend a stale page after leaving the thread via the inbox', async () => {
     // The realistic switch is thread A → /dms → thread B, which
     // UNMOUNTS DmThreadPage between the two (the inbox is its own
