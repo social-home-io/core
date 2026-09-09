@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import type { JSX } from 'preact'
 
 // The heavy DmThreadPage cold render (fresh ``import()`` + mocked-API
 // microtask chain + layout effects) can take several seconds under the full
@@ -666,11 +667,16 @@ describe('DmThreadPage — load-effect failure isolation', () => {
         )).toBe(true)
       }, { timeout: RENDER_WAIT })
 
-      // The user navigates to thread B; the effect re-runs against
-      // the new id. ``key`` forces the remount the real router
-      // performs on a route change — without it @preact/signals'
-      // ``shouldComponentUpdate`` skips the re-render entirely (same
-      // props, no dirty signal), so the effect would never see B.
+      // The user navigates to thread B; the effect re-runs against the
+      // new id. The changing ``key`` is only a device to force an
+      // update — with identical props and no dirty signal,
+      // @preact/signals' ``shouldComponentUpdate`` skips the re-render
+      // entirely and the effect would never see B. It is NOT what the
+      // router does: ``App.tsx`` keys each route by its path *pattern*
+      // (``/dms/:id``), so a real DM→DM navigation diffs into the same
+      // instance. That distinction doesn't matter here — ``cancelled``
+      // is closure-scoped, so it survives either shape — but it does
+      // for the ref-vs-module marker in the staleness tests below.
       routeState.convId = 'conv-b'
       rerender(<DmThreadPage key="conv-b" />)
       await waitFor(() => {
@@ -682,6 +688,255 @@ describe('DmThreadPage — load-effect failure isolation', () => {
       await new Promise(r => setTimeout(r, 50))
       expect(container.textContent ?? '').toContain('THREAD-B')
       expect(container.textContent ?? '').not.toContain('THREAD-A')
+    } finally {
+      restore()
+    }
+  })
+})
+
+// ── Integration: the older-history (``loadOlder``) staleness guard ──
+// ``loadOlder`` lives outside the big load effect, so it can't see that
+// effect's per-run ``cancelled`` flag. It captures ``convId`` from the
+// render closure, awaits a network round-trip, and then *prepends* into
+// the module-level ``messages`` signal — so a page belonging to the
+// thread the user just left would splice foreign history into the
+// thread they're actually reading. ``activeConvRef`` is the guard.
+describe('DmThreadPage — older-history staleness', () => {
+  const convRow = (id: string) => ({
+    id, type: 'dm', name: null,
+    last_message_at: '2026-05-17T13:00:42+00:00',
+    members: [{ user_id: 'u-bob', username: 'bob', display_name: 'Bob', picture_url: null }],
+    member_count: 2, unread: 0, last_read_at: null,
+  })
+  const msgRow = (id: string, content: string) => ({
+    id, sender_user_id: 'u-bob', content, type: 'text',
+    media_url: null, file_name: null, mime_type: null,
+    file_size_bytes: null, reply_to_id: null,
+    reactions: [], deleted: false,
+    created_at: '2026-05-17T13:00:42+00:00',
+    edited_at: null,
+  })
+  const memberRows = [{
+    user_id: 'u-bob', username: 'bob', display_name: 'Bob',
+    picture_url: null, is_online: false, is_idle: false, last_seen_at: null,
+  }]
+  /** ``unread: 0`` + ``last_read_at: null`` → the load effect's window
+   *  ``limit`` floors at 25, and it derives ``hasMoreHistory`` from
+   *  ``data.length === limit``. A page of exactly 25 is therefore the
+   *  fixture shape that leaves "there is older history" ON, which is
+   *  what arms the ``loadOlder`` trigger. */
+  const fullPage = (prefix: string) => Array.from({ length: 25 }).map(
+    (_, i) => msgRow(`${prefix}-${24 - i}`, `${prefix} body ${24 - i}`),
+  )
+
+  /** Put the container at the visual top and fire the scroll handler.
+   *  ``scrollHeight === clientHeight`` makes ``maxScroll`` 0, so
+   *  ``distFromTop`` is 0 — inside ``handleScroll``'s 120 px
+   *  lazy-load trigger. jsdom does no layout, so a dispatched
+   *  ``scroll`` event on the container is the only way in. */
+  /** Re-render the SAME component instance against a new route id.
+   *
+   *  ``DmThreadPage`` declares no props, so we cast at the JSX site to
+   *  pass a throwaway ``tick``. That's the cheapest way to make
+   *  @preact/signals' ``shouldComponentUpdate`` see changed props and
+   *  actually re-render — with identical props and no dirty signal it
+   *  skips the update entirely and the load effect never observes the
+   *  new ``convId``.
+   *
+   *  A changing ``key`` forces an update too, but by REMOUNTING, which
+   *  throws away the hook state — including ``activeConvRef`` — so the
+   *  stale ``loadOlder`` closure would keep reading its own dead ref,
+   *  pinned at the old id, and the guard could never fire. Production
+   *  does not remount on a DM→DM navigation: ``App.tsx`` keys each
+   *  ``<Route>`` by its path *pattern* (``/dms/:id``), so conv-a →
+   *  conv-b diffs into the same instance and only the ``[convId]``
+   *  effect re-runs. Same-instance re-render is the faithful shape. */
+  const asPage = (C: unknown) => C as (p: { tick: number }) => JSX.Element
+
+  const scrollToTop = (container: Element) => {
+    const el = container.querySelector('.sh-messages')
+    expect(el).not.toBeNull()
+    el!.dispatchEvent(new Event('scroll'))
+  }
+
+  it('does not prepend an older-history page belonging to the thread we left', async () => {
+    const restore = stubScrollMetrics({
+      scrollTop: 0, scrollHeight: 600, clientHeight: 600,
+    })
+    try {
+      // Thread A's *older-history* page is pinned open until we release it.
+      let releaseOlderA: (rows: unknown[]) => void = () => {}
+      const slowOlderA = new Promise<unknown[]>(res => { releaseOlderA = res })
+      apiGet.mockImplementation(async (url: string) => {
+        if (url === '/api/conversations') return [convRow('conv-a'), convRow('conv-b')]
+        if (url.startsWith('/api/conversations/conv-a/messages')) {
+          return url.includes('before=') ? slowOlderA : fullPage('THREAD-A')
+        }
+        if (url.startsWith('/api/conversations/conv-b/messages')) {
+          // Short page (< limit) → B has no older history of its own,
+          // so nothing but the stale write can touch B's list.
+          return url.includes('before=')
+            ? []
+            : [msgRow('msg-b', 'THREAD-B: the thread the user is looking at')]
+        }
+        if (url.endsWith('/members')) return memberRows
+        return []
+      })
+
+      routeState.convId = 'conv-a'
+      const { render, waitFor } = await import('@testing-library/preact')
+      const { default: DmThreadPage } = await import('./DmThreadPage')
+      const Page = asPage(DmThreadPage)
+      const { container, rerender } = render(<Page tick={1} />)
+      await waitFor(() => {
+        expect(container.textContent ?? '').toContain('THREAD-A body 0')
+      }, { timeout: RENDER_WAIT })
+
+      // Scroll up in A → the older-history fetch goes out and hangs.
+      scrollToTop(container)
+      await waitFor(() => {
+        expect(apiGet.mock.calls.some(
+          ([url]) => typeof url === 'string'
+            && url.startsWith('/api/conversations/conv-a/messages?before='),
+        )).toBe(true)
+      }, { timeout: RENDER_WAIT })
+
+      // The user switches to thread B — same mount, new route id (see
+      // ``asPage`` for why this is a prop bump and not a ``key`` bump).
+      routeState.convId = 'conv-b'
+      rerender(<Page tick={2} />)
+      await waitFor(() => {
+        expect(container.textContent ?? '').toContain('THREAD-B')
+      }, { timeout: RENDER_WAIT })
+
+      // Only now does A's older page land.
+      releaseOlderA([msgRow('msg-a-old', 'THREAD-A-OLDER: history from the thread we left')])
+      await new Promise(r => setTimeout(r, 50))
+      expect(container.textContent ?? '').toContain('THREAD-B')
+      expect(container.textContent ?? '').not.toContain('THREAD-A-OLDER')
+    } finally {
+      restore()
+    }
+  })
+
+  it('does not prepend a stale page after leaving the thread via the inbox', async () => {
+    // The realistic switch is thread A → /dms → thread B, which
+    // UNMOUNTS DmThreadPage between the two (the inbox is its own
+    // route). A per-instance ref is recreated on the remount, so a
+    // stale ``loadOlder`` closure would compare against its own dead
+    // copy — still pinned at conv-a — and let the write through. Only a
+    // marker that outlives the unmount can catch this path, which is
+    // the common one; a direct conv-a → conv-b deep link is the rare
+    // one.
+    const restore = stubScrollMetrics({
+      scrollTop: 0, scrollHeight: 600, clientHeight: 600,
+    })
+    try {
+      let releaseOlderA: (rows: unknown[]) => void = () => {}
+      const slowOlderA = new Promise<unknown[]>(res => { releaseOlderA = res })
+      apiGet.mockImplementation(async (url: string) => {
+        if (url === '/api/conversations') return [convRow('conv-a'), convRow('conv-b')]
+        if (url.startsWith('/api/conversations/conv-a/messages')) {
+          return url.includes('before=') ? slowOlderA : fullPage('THREAD-A')
+        }
+        if (url.startsWith('/api/conversations/conv-b/messages')) {
+          return url.includes('before=')
+            ? []
+            : [msgRow('msg-b', 'THREAD-B: the thread the user is looking at')]
+        }
+        if (url.endsWith('/members')) return memberRows
+        return []
+      })
+
+      routeState.convId = 'conv-a'
+      const { render, waitFor } = await import('@testing-library/preact')
+      const { default: DmThreadPage } = await import('./DmThreadPage')
+      const Page = asPage(DmThreadPage)
+      const first = render(<Page tick={1} />)
+      await waitFor(() => {
+        expect(first.container.textContent ?? '').toContain('THREAD-A body 0')
+      }, { timeout: RENDER_WAIT })
+      scrollToTop(first.container)
+      await waitFor(() => {
+        expect(apiGet.mock.calls.some(
+          ([url]) => typeof url === 'string'
+            && url.startsWith('/api/conversations/conv-a/messages?before='),
+        )).toBe(true)
+      }, { timeout: RENDER_WAIT })
+
+      // Leave the thread entirely (the /dms hop), then open B fresh.
+      first.unmount()
+      routeState.convId = 'conv-b'
+      const second = render(<Page tick={1} />)
+      await waitFor(() => {
+        expect(second.container.textContent ?? '').toContain('THREAD-B')
+      }, { timeout: RENDER_WAIT })
+
+      releaseOlderA([msgRow('msg-a-old', 'THREAD-A-OLDER: history from the thread we left')])
+      await new Promise(r => setTimeout(r, 50))
+      expect(second.container.textContent ?? '').toContain('THREAD-B')
+      expect(second.container.textContent ?? '').not.toContain('THREAD-A-OLDER')
+    } finally {
+      restore()
+    }
+  })
+
+  it('does not let a stale older-history page clear the new thread\'s spinner', async () => {
+    // ``isLoadingOlder`` is a module-level signal shared across threads.
+    // A stale page resolving its ``finally`` would flip it to ``false``
+    // while the *new* thread's own page is still in flight — killing the
+    // spinner and re-arming ``handleScroll`` to double-fetch.
+    const restore = stubScrollMetrics({
+      scrollTop: 0, scrollHeight: 600, clientHeight: 600,
+    })
+    try {
+      let releaseOlderA: (rows: unknown[]) => void = () => {}
+      const slowOlderA = new Promise<unknown[]>(res => { releaseOlderA = res })
+      // B's older page never settles — the spinner is its proxy.
+      const neverOlderB = new Promise<unknown[]>(() => {})
+      apiGet.mockImplementation(async (url: string) => {
+        if (url === '/api/conversations') return [convRow('conv-a'), convRow('conv-b')]
+        if (url.startsWith('/api/conversations/conv-a/messages')) {
+          return url.includes('before=') ? slowOlderA : fullPage('THREAD-A')
+        }
+        if (url.startsWith('/api/conversations/conv-b/messages')) {
+          return url.includes('before=') ? neverOlderB : fullPage('THREAD-B')
+        }
+        if (url.endsWith('/members')) return memberRows
+        return []
+      })
+
+      routeState.convId = 'conv-a'
+      const { render, waitFor } = await import('@testing-library/preact')
+      const { default: DmThreadPage } = await import('./DmThreadPage')
+      const Page = asPage(DmThreadPage)
+      const { container, rerender } = render(<Page tick={1} />)
+      await waitFor(() => {
+        expect(container.textContent ?? '').toContain('THREAD-A body 0')
+      }, { timeout: RENDER_WAIT })
+      scrollToTop(container)
+      await waitFor(() => {
+        expect(apiGet.mock.calls.some(
+          ([url]) => typeof url === 'string'
+            && url.startsWith('/api/conversations/conv-a/messages?before='),
+        )).toBe(true)
+      }, { timeout: RENDER_WAIT })
+
+      routeState.convId = 'conv-b'
+      rerender(<Page tick={2} />)
+      await waitFor(() => {
+        expect(container.textContent ?? '').toContain('THREAD-B body 0')
+      }, { timeout: RENDER_WAIT })
+
+      // B scrolls up too — its own older fetch is now the in-flight one.
+      scrollToTop(container)
+      await waitFor(() => {
+        expect(container.querySelector('.sh-dm-load-older')).not.toBeNull()
+      }, { timeout: RENDER_WAIT })
+
+      releaseOlderA([msgRow('msg-a-old', 'THREAD-A-OLDER: history from the thread we left')])
+      await new Promise(r => setTimeout(r, 50))
+      expect(container.querySelector('.sh-dm-load-older')).not.toBeNull()
     } finally {
       restore()
     }
