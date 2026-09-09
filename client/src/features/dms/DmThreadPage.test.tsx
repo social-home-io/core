@@ -109,12 +109,23 @@ describe('isAtLiveEdge', () => {
 const apiGet = vi.fn()
 const apiPost = vi.fn()
 
+/** Mutable route holder read by the single ``preact-iso`` factory
+ *  below. Defaults to ``'conv-test'`` so every test that doesn't care
+ *  sees the historical pinned id; the stale-response test flips it
+ *  mid-flight to simulate the user switching threads. A holder (not a
+ *  second ``vi.mock`` factory) keeps the "exactly one factory per
+ *  module id" invariant the flake fix established. */
+const routeState = { convId: 'conv-test' }
+
 vi.mock('preact-iso', () => ({
   // Pin the route so DmThreadPage's ``useRoute().params.id`` resolves
   // to a known conv-id; the real router would set this via
   // ``<Route path="/dms/:id">`` but we're mounting the page directly.
-  useRoute: () => ({ params: { id: 'conv-test' }, path: '/dms/conv-test' }),
-  useLocation: () => ({ url: '/dms/conv-test', route: vi.fn() }),
+  useRoute: () => ({
+    params: { id: routeState.convId },
+    path: `/dms/${routeState.convId}`,
+  }),
+  useLocation: () => ({ url: `/dms/${routeState.convId}`, route: vi.fn() }),
   lazy: (fn: () => Promise<{ default: unknown }>) => fn,
   LocationProvider: ({ children }: { children: unknown }) => children,
   Router: ({ children }: { children: unknown }) => children,
@@ -210,6 +221,7 @@ beforeEach(() => {
   apiGet.mockReset()
   apiPost.mockReset()
   apiPost.mockResolvedValue({})
+  routeState.convId = 'conv-test'
 })
 
 describe('DmThreadPage — jump-down chip integration', () => {
@@ -528,5 +540,150 @@ describe('DmThreadPage — composer mic⇄send swap', () => {
     await waitFor(() => {
       expect(container.querySelector('[aria-label="Send message"]')).not.toBeNull()
     }, { timeout: RENDER_WAIT })
+  })
+})
+
+describe('DmThreadPage — load-effect failure isolation', () => {
+  // The messages fetch used to carry a single trailing ``.catch`` that
+  // was *documented* as the network-failure branch but structurally
+  // also caught anything thrown by its own ~50-line success handler —
+  // and its response was to blank the thread. So a bug in the
+  // unread-anchor math (or, as here, in the fire-and-forget read POST)
+  // presented to the user as "this conversation is empty", with no
+  // toast and no log. The two paths are now separate: a rejected fetch
+  // clears the skeleton and empties the list, a throw out of the
+  // success handler leaves the rendered thread alone and logs.
+  it('keeps the fetched messages on screen when the success handler throws', async () => {
+    const restore = stubScrollMetrics({
+      scrollTop: 0, scrollHeight: 600, clientHeight: 600,
+    })
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      wireApiMock({
+        // ``unread: 0`` + ``last_read_at: null`` → no unread anchor, so
+        // the success handler always reaches the mark-as-read POST.
+        conversations: [{
+          id: 'conv-test', type: 'dm', name: null,
+          last_message_at: '2026-05-17T13:00:42+00:00',
+          members: [{ user_id: 'u-bob', username: 'bob', display_name: 'Bob', picture_url: null }],
+          member_count: 2, unread: 0, last_read_at: null,
+        }],
+        messages: [{
+          id: 'msg-1',
+          sender_user_id: 'u-bob',
+          content: 'STILL-HERE: handler threw but the thread stands',
+          type: 'text',
+          media_url: null, file_name: null, mime_type: null,
+          file_size_bytes: null, reply_to_id: null,
+          reactions: [], deleted: false,
+          created_at: '2026-05-17T13:00:42+00:00',
+          edited_at: null,
+        }],
+        members: [{
+          user_id: 'u-bob', username: 'bob', display_name: 'Bob',
+          picture_url: null, is_online: false, is_idle: false, last_seen_at: null,
+        }],
+      })
+      // Throw *synchronously* out of the read POST — the cheapest
+      // reliable stand-in for a bug anywhere in the success handler.
+      apiPost.mockImplementation(() => { throw new Error('boom') })
+
+      const { render, waitFor } = await import('@testing-library/preact')
+      const { default: DmThreadPage } = await import('./DmThreadPage')
+      const { container } = render(<DmThreadPage />)
+      // Wait until the handler has actually reached (and thrown from)
+      // the read POST, so the assertion below is about the aftermath.
+      await waitFor(() => {
+        expect(apiPost.mock.calls.some(
+          ([url]) => typeof url === 'string' && url.endsWith('/read'),
+        )).toBe(true)
+      }, { timeout: RENDER_WAIT })
+      // Let the rejection propagate through its microtask + a render.
+      await new Promise(r => setTimeout(r, 50))
+      expect(container.textContent ?? '').toContain('STILL-HERE')
+      // Silent failure was half the bug — the thread survives *and*
+      // the throw is diagnosable, with the thread id in the log.
+      expect(errSpy.mock.calls.some(
+        args => args.some(a => typeof a === 'string' && a.includes('conv-test')),
+      )).toBe(true)
+    } finally {
+      errSpy.mockRestore()
+      restore()
+    }
+  })
+
+  it('does not let a slow response from the previous thread overwrite the current one', async () => {
+    // Switching threads re-runs the load effect, but the in-flight
+    // request from the thread we just left still resolves — and every
+    // continuation writes module-level signals. Without a per-run
+    // staleness guard the late response repaints thread A's messages
+    // over thread B, which the user reads as "wrong conversation".
+    const restore = stubScrollMetrics({
+      scrollTop: 0, scrollHeight: 600, clientHeight: 600,
+    })
+    try {
+      const convRow = (id: string) => ({
+        id, type: 'dm', name: null,
+        last_message_at: '2026-05-17T13:00:42+00:00',
+        members: [{ user_id: 'u-bob', username: 'bob', display_name: 'Bob', picture_url: null }],
+        member_count: 2, unread: 0, last_read_at: null,
+      })
+      const msgRow = (id: string, content: string) => ({
+        id, sender_user_id: 'u-bob', content, type: 'text',
+        media_url: null, file_name: null, mime_type: null,
+        file_size_bytes: null, reply_to_id: null,
+        reactions: [], deleted: false,
+        created_at: '2026-05-17T13:00:42+00:00',
+        edited_at: null,
+      })
+      // Thread A's messages fetch never settles until we say so.
+      let releaseA: (rows: unknown[]) => void = () => {}
+      const slowA = new Promise<unknown[]>(res => { releaseA = res })
+      apiGet.mockImplementation(async (url: string) => {
+        if (url === '/api/conversations') return [convRow('conv-a'), convRow('conv-b')]
+        if (url.startsWith('/api/conversations/conv-a/messages')) return slowA
+        if (url.startsWith('/api/conversations/conv-b/messages')) {
+          return [msgRow('msg-b', 'THREAD-B: the thread the user is looking at')]
+        }
+        if (url.endsWith('/members')) {
+          return [{
+            user_id: 'u-bob', username: 'bob', display_name: 'Bob',
+            picture_url: null, is_online: false, is_idle: false, last_seen_at: null,
+          }]
+        }
+        return []
+      })
+
+      routeState.convId = 'conv-a'
+      const { render, waitFor } = await import('@testing-library/preact')
+      const { default: DmThreadPage } = await import('./DmThreadPage')
+      const { container, rerender } = render(<DmThreadPage />)
+      // A's messages fetch is in flight (and pinned open).
+      await waitFor(() => {
+        expect(apiGet.mock.calls.some(
+          ([url]) => typeof url === 'string'
+            && url.startsWith('/api/conversations/conv-a/messages'),
+        )).toBe(true)
+      }, { timeout: RENDER_WAIT })
+
+      // The user navigates to thread B; the effect re-runs against
+      // the new id. ``key`` forces the remount the real router
+      // performs on a route change — without it @preact/signals'
+      // ``shouldComponentUpdate`` skips the re-render entirely (same
+      // props, no dirty signal), so the effect would never see B.
+      routeState.convId = 'conv-b'
+      rerender(<DmThreadPage key="conv-b" />)
+      await waitFor(() => {
+        expect(container.textContent ?? '').toContain('THREAD-B')
+      }, { timeout: RENDER_WAIT })
+
+      // Only now does A's request come back.
+      releaseA([msgRow('msg-a', 'THREAD-A: stale response from the thread we left')])
+      await new Promise(r => setTimeout(r, 50))
+      expect(container.textContent ?? '').toContain('THREAD-B')
+      expect(container.textContent ?? '').not.toContain('THREAD-A')
+    } finally {
+      restore()
+    }
   })
 })

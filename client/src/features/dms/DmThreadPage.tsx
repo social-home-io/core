@@ -584,6 +584,15 @@ export default function DmThreadPage() {
   }, [convId, isLoading, anchor?.message_id])
 
   useEffect(() => {
+    // Staleness guard for this effect run. ``convId`` changes re-run the
+    // effect, but the requests fired for the thread we just left are
+    // still in flight — and every continuation below writes *module-
+    // level* signals. Without this flag a slow response from the
+    // previous thread lands after the new one has painted and repaints
+    // its messages / roster / gaps over the thread the user is actually
+    // looking at. The cleanup flips it, so each continuation re-checks
+    // "am I still the active thread?" before touching any signal.
+    let cancelled = false
     loading.value = true
     // Reset the lazy-load + anchor state for the new thread. Without
     // this a re-entry would inherit the previous thread's divider or
@@ -624,6 +633,7 @@ export default function DmThreadPage() {
     })
 
     summaryPromise.then(() => {
+      if (cancelled) return
       // Window size: enough to overflow the viewport comfortably (so
       // the user can actually scroll up and trigger ``loadOlder``),
       // but small enough that the entry skeleton-to-content swap
@@ -638,63 +648,88 @@ export default function DmThreadPage() {
       // screen position as the real bottom-of-thread, so the swap
       // looks like a fade-in, not a scroll.
       const limit = Math.min(Math.max(unreadHint + 5, 25), 100)
-      api.get(`/api/conversations/${convId}/messages?limit=${limit}`).then(data => {
-        const msgs: Message[] = (data ?? []).slice().reverse()
-        messages.value = msgs
-        loading.value = false
-        // If we got fewer than ``limit`` back, the thread is shorter
-        // than the window — no older history to fetch.
-        hasMoreHistory.value = (data ?? []).length === limit
-        // Pick the first-unread message in the loaded window. A
-        // message counts as unread when it was created strictly after
-        // the caller's ``last_read_at`` AND was not authored by the
-        // caller (a user's own message can't be "unread" to them).
-        if (lastReadAt && unreadHint > 0) {
-          const myId = currentUser.value?.user_id
-          // ``normaliseTimestamp`` tags the naive SQLite shape
-          // ("YYYY-MM-DD HH:MM:SS", no Z) as UTC before parsing —
-          // without this, viewers in a non-UTC zone see V8 interpret
-          // the naive string as *their* local wall clock and shift
-          // ``lastReadMs`` by the UTC offset, landing the divider on
-          // the wrong message (or no divider at all). The message's
-          // own ``created_at`` is already tz-aware ISO but routing
-          // both sides through the same helper keeps the math
-          // consistent if that ever drifts.
-          const lastReadMs = Date.parse(normaliseTimestamp(lastReadAt))
-          if (!Number.isNaN(lastReadMs)) {
-            const firstUnread = msgs.find(m =>
-              m.sender_user_id !== myId
-              && Date.parse(normaliseTimestamp(m.created_at)) > lastReadMs,
-            )
-            if (firstUnread) {
-              unreadAnchor.value = { message_id: firstUnread.id }
+      api.get(`/api/conversations/${convId}/messages?limit=${limit}`).then(
+        data => {
+          if (cancelled) return
+          const msgs: Message[] = (data ?? []).slice().reverse()
+          messages.value = msgs
+          loading.value = false
+          // If we got fewer than ``limit`` back, the thread is shorter
+          // than the window — no older history to fetch.
+          hasMoreHistory.value = (data ?? []).length === limit
+          // Pick the first-unread message in the loaded window. A
+          // message counts as unread when it was created strictly after
+          // the caller's ``last_read_at`` AND was not authored by the
+          // caller (a user's own message can't be "unread" to them).
+          if (lastReadAt && unreadHint > 0) {
+            const myId = currentUser.value?.user_id
+            // ``normaliseTimestamp`` tags the naive SQLite shape
+            // ("YYYY-MM-DD HH:MM:SS", no Z) as UTC before parsing —
+            // without this, viewers in a non-UTC zone see V8 interpret
+            // the naive string as *their* local wall clock and shift
+            // ``lastReadMs`` by the UTC offset, landing the divider on
+            // the wrong message (or no divider at all). The message's
+            // own ``created_at`` is already tz-aware ISO but routing
+            // both sides through the same helper keeps the math
+            // consistent if that ever drifts.
+            const lastReadMs = Date.parse(normaliseTimestamp(lastReadAt))
+            if (!Number.isNaN(lastReadMs)) {
+              const firstUnread = msgs.find(m =>
+                m.sender_user_id !== myId
+                && Date.parse(normaliseTimestamp(m.created_at)) > lastReadMs,
+              )
+              if (firstUnread) {
+                unreadAnchor.value = { message_id: firstUnread.id }
+              }
             }
           }
-        }
-        // If there were no unreads (or no last_read_at), entry will
-        // scroll to bottom — mark-as-read on entry stays unchanged for
-        // that case. When there ARE unreads we defer the read POST
-        // until the user actually scrolls past the divider (see the
-        // ``handleScroll`` branch); marking on entry would advance the
-        // watermark before the user has seen anything and the next
-        // entry wouldn't render the divider.
-        if (!unreadAnchor.value && readReceiptsEnabled.value) {
-          api.post(`/api/conversations/${convId}/read`).catch(() => {})
-        }
-      }).catch(() => {
-        // Network blip or 5xx — don't strand the user on the skeleton
-        // forever. The thread page renders an empty list (which the
-        // existing empty-state copy handles) and the next entry
-        // retries; surfacing a toast would be louder than necessary
-        // for a transient backend glitch.
+          // If there were no unreads (or no last_read_at), entry will
+          // scroll to bottom — mark-as-read on entry stays unchanged for
+          // that case. When there ARE unreads we defer the read POST
+          // until the user actually scrolls past the divider (see the
+          // ``handleScroll`` branch); marking on entry would advance the
+          // watermark before the user has seen anything and the next
+          // entry wouldn't render the divider.
+          if (!unreadAnchor.value && readReceiptsEnabled.value) {
+            api.post(`/api/conversations/${convId}/read`).catch(() => {})
+          }
+        },
+        // Second argument, NOT a trailing ``.catch`` — this branch must
+        // see *only* a rejected fetch. A trailing catch would also
+        // swallow anything thrown by the success handler above and
+        // respond by blanking the thread, so a bug in the anchor math
+        // presented to the user as "this conversation is empty".
+        () => {
+          if (cancelled) return
+          // Network blip or 5xx — don't strand the user on the skeleton
+          // forever. The thread page renders an empty list (which the
+          // existing empty-state copy handles) and the next entry
+          // retries; surfacing a toast would be louder than necessary
+          // for a transient backend glitch.
+          loading.value = false
+          messages.value = []
+          hasMoreHistory.value = false
+        },
+      ).catch(err => {
+        // A throw out of the success handler — our own bug, not a
+        // transient backend glitch (that one is handled above). Clear
+        // the skeleton so it can't strand, but leave ``messages`` /
+        // ``hasMoreHistory`` alone: the fetched thread is already on
+        // screen and blanking what the user is reading is strictly
+        // worse than a partially-applied load. Log it so the failure
+        // is diagnosable instead of silent.
+        if (cancelled) return
         loading.value = false
-        messages.value = []
-        hasMoreHistory.value = false
+        console.error(
+          `[DmThreadPage] messages load handler threw for conversation ${convId}`,
+          err,
+        )
       })
       // Hydrate delivery/read state for every message so ticks render
       // immediately — not just on messages we've seen WS frames for.
       api.get(`/api/conversations/${convId}/delivery-states`).then(
         (body: { states: DeliveryState[] }) => {
+          if (cancelled) return
           const delivered = new Set<string>()
           const read = new Set<string>()
           for (const s of body.states || []) {
@@ -708,18 +743,24 @@ export default function DmThreadPage() {
       // Poll for open sequence gaps — tiny endpoint, once per thread load.
       api.get(`/api/conversations/${convId}/gaps`).then(
         (body: { gaps: MessageGap[] }) => {
+          if (cancelled) return
           gaps.value = body.gaps || []
         },
-      ).catch(() => { gaps.value = [] })
+      ).catch(() => {
+        if (cancelled) return
+        gaps.value = []
+      })
     })
     // Roster fetch — drives the call-button visibility (member_count) AND
     // the WhatsApp-style "Online" / "Last seen 2 h ago" status line in the
     // thread header. Live-patched below by the user.online/idle/offline
     // WS frames so the header stays current without polling.
     api.get(`/api/conversations/${convId}/members`).then((rows: ThreadMember[]) => {
+      if (cancelled) return
       threadMembers.value = rows
       memberCount.value = rows.length || 2
     }).catch(() => {
+      if (cancelled) return
       threadMembers.value = []
       memberCount.value = 2
     })
@@ -900,6 +941,7 @@ export default function DmThreadPage() {
       })
     })
     return () => {
+      cancelled = true
       offRead(); offNewMsg(); offMediaReady(); offMessageUpdated()
       offReaction()
       offUserOnline(); offUserIdle(); offUserOffline()
