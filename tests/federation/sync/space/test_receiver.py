@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 
 import orjson
 import pytest
@@ -49,6 +51,21 @@ class _FakeSpaceRepo:
     def __init__(self):
         self.members = []
         self.bans = []
+        #: space_id → host household identity pubkey (hex). Populated on a
+        #: stub whose host we are NOT paired with; the receiver falls back
+        #: to it to verify mesh-routed chunk signatures (#648).
+        self.host_identity_pks: dict[str, str] = {}
+        #: space_id → Space (or a stand-in exposing owner_instance_id).
+        self.spaces: dict[str, object] = {}
+
+    async def get_host_identity_pk(self, space_id):
+        return self.host_identity_pks.get(space_id)
+
+    async def set_host_identity_pk(self, space_id, pk_hex):
+        self.host_identity_pks[space_id] = pk_hex
+
+    async def get(self, space_id):
+        return self.spaces.get(space_id)
 
     async def save_member(self, member):
         self.members.append(member)
@@ -224,6 +241,11 @@ async def test_on_chunk_sentinel_publishes_completion(bus, receiver, peer_setup)
 
 
 async def test_on_chunk_rejects_unknown_peer(receiver, peer_setup):
+    """No paired-peer row AND no stored host key → drop.
+
+    The #648 fallback must not turn this into an accept: an unpaired
+    sender we hold no verified key for stays unauthenticated.
+    """
     r, space_repo, _ = receiver
     peer, kp = peer_setup
     envelope = {
@@ -432,3 +454,126 @@ async def test_decrypt_failure_other_than_missing_key_still_drops(
     await r.on_chunk(serialise_chunk(envelope), from_instance="peer-a")
     # Not stashed (the failure is permanent, not race-recoverable).
     assert len(cache) == 0
+
+
+# ── #648: a mesh host has no paired-peer row ──────────────────────────
+
+
+async def test_on_chunk_verifies_mesh_host_via_space_host_identity_pk(
+    receiver, peer_setup
+):
+    """A chunk from an UNPAIRED host verifies against the space's host key.
+
+    This is #648's third layer. A member that joined over the mesh has no
+    ``remote_instances`` row for the host, so the paired-peer lookup
+    returns None and every chunk used to be discarded at DEBUG — the
+    joiner ended up with the space stub, the content key and the media
+    bytes but zero post rows. The key comes from the sealed invite and was
+    only stored after ``derive_instance_id(pk) == host`` passed.
+    """
+    r, space_repo, _ = receiver
+    _peer, kp = peer_setup
+    host = "mesh-host-iid"
+    space_repo.host_identity_pks["sp-mesh"] = kp.public_key.hex()
+    space_repo.spaces["sp-mesh"] = SimpleNamespace(owner_instance_id=host)
+
+    crypto = _FakeCrypto()
+    _, ciphertext = await crypto.encrypt_chunk(
+        space_id="sp-mesh",
+        sync_id="sync-mesh",
+        plaintext=orjson.dumps(
+            {
+                "records": [
+                    {
+                        "user_id": "u-mesh",
+                        "role": "member",
+                        "joined_at": "2026-04-18T00:00:00+00:00",
+                    }
+                ],
+            }
+        ),
+    )
+    envelope = await _sign_as_peer(
+        kp,
+        {
+            "sync_id": "sync-mesh",
+            "resource": "members",
+            "space_id": "sp-mesh",
+            "epoch": 0,
+            "seq_start": 0,
+            "seq_end": 0,
+            "is_last": False,
+            "encrypted_payload": ciphertext,
+        },
+    )
+
+    await r.on_chunk(serialise_chunk(envelope), from_instance=host)
+
+    # Verified and dispatched — the members resource persisted a row.
+    assert space_repo.members, "chunk from a mesh host was still dropped"
+    assert space_repo.members[0].user_id == "u-mesh"
+
+
+async def test_on_chunk_rejects_mesh_chunk_from_a_non_host_instance(
+    receiver, peer_setup
+):
+    """Only the household the stub names as host may sign the space's content.
+
+    Otherwise any unpaired instance that named the space id would be
+    verified against the host's key. It would fail the signature check,
+    but the identity binding belongs here explicitly.
+    """
+    r, space_repo, _ = receiver
+    _peer, kp = peer_setup
+    space_repo.host_identity_pks["sp-mesh"] = kp.public_key.hex()
+    space_repo.spaces["sp-mesh"] = SimpleNamespace(owner_instance_id="the-real-host")
+
+    envelope = await _sign_as_peer(
+        kp,
+        {
+            "sync_id": "sync-mesh",
+            "resource": "members",
+            "space_id": "sp-mesh",
+            "epoch": 0,
+            "seq_start": 0,
+            "seq_end": 0,
+            "is_last": False,
+            "encrypted_payload": "x:y",
+        },
+    )
+
+    await r.on_chunk(serialise_chunk(envelope), from_instance="some-other-household")
+
+    assert space_repo.members == []
+
+
+async def test_on_chunk_rejects_mesh_chunk_signed_by_the_wrong_key(
+    receiver, peer_setup
+):
+    """A tampered/forged chunk still fails once the fallback key is used."""
+    r, space_repo, _ = receiver
+    _peer, _kp = peer_setup
+    host = "mesh-host-iid"
+    attacker = generate_identity_keypair()
+    # The stub holds the REAL host key; the chunk is signed by someone else.
+    real_host = generate_identity_keypair()
+    space_repo.host_identity_pks["sp-mesh"] = real_host.public_key.hex()
+    space_repo.spaces["sp-mesh"] = SimpleNamespace(owner_instance_id=host)
+
+    envelope = await _sign_as_peer(
+        attacker,
+        {
+            "sync_id": "sync-mesh",
+            "resource": "members",
+            "space_id": "sp-mesh",
+            "epoch": 0,
+            "seq_start": 0,
+            "seq_end": 0,
+            "is_last": False,
+            "encrypted_payload": "x:y",
+        },
+    )
+
+    await r.on_chunk(serialise_chunk(envelope), from_instance=host)
+
+    assert space_repo.members == []

@@ -1029,16 +1029,49 @@ class FederationService:
                 inner_payload=payload,
             )
         except Exception as exc:
+            # The cached path is the prime suspect — a relay that has since
+            # gone away, or a route whose next hop no longer accepts us.
+            # ``discover_route`` is cache-first, so a bare retry would
+            # re-use the same dead chain: drop it first, then try once
+            # against a freshly-probed path. This is ``invalidate()``'s
+            # reason for existing (it had no production caller before #648).
             log.warning(
-                "send_with_mesh_fallback: routed ship to %s failed: %s",
+                "send_with_mesh_fallback: routed ship to %s failed (%s);"
+                " invalidating the cached route and retrying once",
                 to_instance_id,
                 exc,
             )
-            return DeliveryResult(
-                instance_id=to_instance_id,
-                ok=False,
-                error="routed_send_failed",
-            )
+            await self._route_service.invalidate(to_instance_id)
+            retry = await self._route_service.discover_route(to_instance_id)
+            if retry is None or len(retry[0]) < 2:
+                return DeliveryResult(
+                    instance_id=to_instance_id,
+                    ok=False,
+                    error="no_route",
+                )
+            retry_path, retry_eph = retry
+            try:
+                # Deliberately NOT a recursive call back into this helper:
+                # one forced re-discovery, one retry, then give up. A
+                # recursive retry would let a persistently-broken target
+                # amplify a single send into an unbounded probe storm.
+                await self._routed_handler.send_routed(
+                    path=retry_path,
+                    target_eph_pk_b64=retry_eph,
+                    inner_event_type=event_type,
+                    inner_payload=payload,
+                )
+            except Exception as retry_exc:
+                log.warning(
+                    "send_with_mesh_fallback: routed retry to %s failed: %s",
+                    to_instance_id,
+                    retry_exc,
+                )
+                return DeliveryResult(
+                    instance_id=to_instance_id,
+                    ok=False,
+                    error="routed_send_failed",
+                )
         return DeliveryResult(instance_id=to_instance_id, ok=True)
 
     async def begin_mesh_catchup_sync(
@@ -1046,7 +1079,7 @@ class FederationService:
         *,
         space_id: str,
         host_instance_id: str,
-    ) -> None:
+    ) -> bool:
         """Initiate a §25.6 catch-up sync FROM a mesh-only host.
 
         For a space whose host is NOT a confirmed direct peer (we joined over a
@@ -1056,12 +1089,20 @@ class FederationService:
         replies aren't dropped), then send SPACE_SYNC_BEGIN(prefer_direct=False)
         to the host via mesh fallback. No-op for a confirmed host (the scheduler
         already covers it) or when the sync machinery isn't wired. Fail-soft.
+
+        Returns ``True`` only when the BEGIN actually left the building.
+        ``False`` marks a *transient* failure — above all ``no_route``, which
+        is what a freshly-rebooted household gets while the mesh is still
+        warming up — so the caller can retry in seconds rather than writing
+        the space off until the next 30-minute tick (#648).
         """
         try:
             if self._sync_manager is None:
-                return
+                return False
             if await self.is_confirmed_peer(host_instance_id):
-                return
+                # Not a failure: the confirmed-peer sweep owns this host, so
+                # the caller should stop asking about it.
+                return True
             sync_id = uuid.uuid4().hex
             self._sync_manager.register_requester_https_session(
                 sync_id=sync_id,
@@ -1090,6 +1131,8 @@ class FederationService:
                 # Don't leak a dangling receive-session for a sync that never
                 # left the building.
                 self._sync_manager.close_session(sync_id)
+                return False
+            return True
         except Exception as exc:  # fail-soft — must not break invite-accept
             log.warning(
                 "begin_mesh_catchup_sync for space %s host %s errored: %s",
@@ -1097,6 +1140,7 @@ class FederationService:
                 host_instance_id,
                 exc,
             )
+            return False
 
     async def send_media_chunk(
         self,
@@ -1950,7 +1994,13 @@ class FederationService:
                 # to the S-1 silent drop (the member still reconciles via the
                 # normal SPACE_DISSOLVED broadcast / outbox).
                 return
-            await self.send_event(
+            # A mesh-only requester is not a CONFIRMED peer, so a bare
+            # ``send_event`` here is silence — and silence is exactly what
+            # makes a requester retry into the rate limit forever. Route
+            # every rejection (``not_a_member``, ``rate_limited``,
+            # ``too_many_sessions``, ``node_capacity``) through the mesh
+            # fallback so it lands either way.
+            await self.send_with_mesh_fallback(
                 to_instance_id=event.from_instance,
                 event_type=decision.next_event,
                 payload=decision.next_payload or {},
@@ -1975,6 +2025,22 @@ class FederationService:
             # reachable, …). Stream chunks straight over signed
             # ``SPACE_SYNC_CHUNK`` federation events — the provider
             # doesn't bother with an SDP offer / answer dance.
+            if requester_is_mesh and self._route_service is not None:
+                # #648 — every chunk of this stream is sealed under the
+                # ``target_eph_pk`` our route cache holds for the requester,
+                # but the matching private half only ever lived in *their*
+                # RAM. If they restarted (or the cached entry is near the end
+                # of its window) that pub is already dead and every chunk is
+                # silently dropped on arrival, losing the metadata for good —
+                # the media path self-heals via its durable outbox, the
+                # one-shot metadata stream does not.
+                #
+                # A BEGIN is proof the requester is alive *now*, so drop the
+                # cached route: the first chunk's ``discover_route`` then
+                # probes afresh and the whole stream is sealed under a
+                # full-TTL key minted by the requester's current process.
+                # Bounded by the host's own 5/h ``check_sync_begin_rate``.
+                await self._route_service.invalidate(event.from_instance)
             record = self._sync_manager.get_session(sync_id)
             if record is not None:
                 record.transport_mode = "https"

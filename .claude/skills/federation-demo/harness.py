@@ -3006,6 +3006,26 @@ def cmd_sync_https_fallback() -> None:
     ``federation.send_event(SPACE_SYNC_CHUNK)`` → receiver's
     ``_handle_space_sync_chunk`` forwards to
     ``SpaceSyncReceiver.on_chunk`` → posts persist.
+
+    Note the host here is reachable only over the **mesh** (dave joined
+    c's space via a relay in the preceding step), which is what made
+    this step the regression test for #648:
+
+    * dave's restart drops every ephemeral private half he had minted,
+      so c's cached ``target_eph_pk`` for him is dead — c would seal the
+      whole stream under it and dave would discard every chunk in
+      silence. Fixed by the host invalidating its cached route when it
+      admits a mesh requester's BEGIN.
+    * nothing used to re-issue the BEGIN at all: both scheduler triggers
+      walk CONFIRMED peers, and dave's ``sync_id`` died with his
+      process. Fixed by the scheduler's mesh catch-up sweep — which is
+      why the settle below must outlast
+      ``STARTUP_MESH_CATCHUP_DELAY_SECONDS``.
+
+    So the assertions cover three things, not one: the new post arrives,
+    the pre-invite metadata is *still* there (i.e. a real stream ran,
+    rather than the needle sneaking in via c's outbox redelivery), and
+    dave's log carries no ``no cached target_eph_priv`` drop.
     """
     state = _load()
     if not state:
@@ -3047,31 +3067,84 @@ def cmd_sync_https_fallback() -> None:
     print(f"  c posted while d offline (needle={needle_marker})")
 
     # 2. Restart dave forcing HTTPS-mode sync.
+    d_log_path = _instance_dir("d") / "log.txt"
+    d_log_before = d_log_path.stat().st_size if d_log_path.exists() else 0
     new_pid = _spawn("d", d["port"], extra_env={"SH_FORCE_SYNC_HTTPS": "1"})
     state["instances"]["d"]["pid"] = new_pid
+    # Persist the new pid IMMEDIATELY, not at the end of the step. The
+    # trailing ``_save`` never runs when an assertion below fails, which left
+    # ``state.json`` pointing at the pid we just killed — so ``down`` reaped a
+    # dead process and the respawned d kept port 18004. The next ``up`` then
+    # died with "setup_required=false on a fresh data dir" and every later run
+    # was silently invalid.
+    _save(state)
     _wait_ready(d["port"])
     print(f"  d respawned with SH_FORCE_SYNC_HTTPS=1: pid={new_pid}")
 
-    # 3. Settle: pairing reconfirm fires PairingConfirmed → scheduler
-    #    enqueues SPACE_SYNC_BEGIN with prefer_direct=False → provider
-    #    accepts in HTTPS mode → chunks arrive via federation events.
-    time.sleep(20)
-
-    s, body = _request(
-        f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/feed",
-        token=d["token"],
-    )
-    _must("d feed (after HTTPS sync)", s, body, ok=(200,))
-    posts = body.get("posts") if isinstance(body, dict) else body
-    if not isinstance(posts, list):
-        raise SystemExit(f"unexpected feed shape: {body!r}")
-    matched = [p for p in posts if needle_marker in (p.get("content") or "")]
+    # 3. Settle by POLLING, not by one fixed sleep. For a mesh-only host
+    #    there is no PairingConfirmed to ride on: recovery comes from the
+    #    scheduler's startup mesh catch-up sweep, which fires
+    #    STARTUP_MESH_CATCHUP_DELAY_SECONDS (45 s) after boot and then
+    #    retries on its backoff schedule — a household that has just
+    #    rebooted usually can't route anywhere on the first pass, so the
+    #    BEGIN fails ``no_route`` until the transports come up. Polling
+    #    passes as soon as the metadata lands instead of always paying the
+    #    worst case. (A 20 s settle, what this step used to allow, fired
+    #    before the sweep even started, so it could never pass.)
+    deadline = time.monotonic() + 240.0
+    posts: list = []
+    matched: list = []
+    while time.monotonic() < deadline:
+        time.sleep(10)
+        s, body = _request(
+            f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/feed",
+            token=d["token"],
+        )
+        if s != 200:
+            continue
+        posts = body.get("posts") if isinstance(body, dict) else body
+        if not isinstance(posts, list):
+            raise SystemExit(f"unexpected feed shape: {body!r}")
+        matched = [p for p in posts if needle_marker in (p.get("content") or "")]
+        if matched:
+            break
     if not matched:
         raise SystemExit(
             f"HTTPS fallback failed: d did NOT receive needle "
             f"{needle_marker!r}; saw {[p.get('content') for p in posts]!r}",
         )
     print(f"  d received the post via HTTPS fallback ✓ ({needle_marker})")
+
+    # 4. Prove a real sync stream ran, not just an outbox redelivery of
+    #    the one new post: the pre-invite metadata from the previous
+    #    step must still be present after the restart. (dave keeps his
+    #    DB across the respawn, so this also catches a sync that wiped
+    #    or failed to re-land it.)
+    pre_invite_post = state.get("space_sync_catchup_media_post_id")
+    if pre_invite_post:
+        ids = {p.get("id") for p in posts}
+        if pre_invite_post not in ids:
+            raise SystemExit(
+                f"sync-https-fallback: d's feed lost the pre-invite post "
+                f"{pre_invite_post} after the restart — the needle likely "
+                f"arrived via outbox redelivery rather than a sync stream",
+            )
+        print(f"  d still has the pre-invite post {pre_invite_post} ✓")
+
+    # 5. #648 tripwire: not one chunk may be dropped for want of a
+    #    target ephemeral. This is the exact warning the bug produced,
+    #    and it is silent by design — no NACK, and the host's send
+    #    already reported success — so the log is the only signal.
+    if d_log_path.exists():
+        d_log_after = d_log_path.read_text(errors="replace")[d_log_before:]
+        drops = d_log_after.count("no cached target_eph_priv")
+        if drops:
+            raise SystemExit(
+                f"sync-https-fallback: d dropped {drops} routed envelope(s) "
+                f"for want of a cached target_eph_priv — the host sealed "
+                f"under a key that died with d's previous process (#648)",
+            )
+        print("  d dropped no routed envelopes for a dead ephemeral ✓")
 
     state["sync_https_fallback_ran"] = True
     _save(state)
@@ -4276,6 +4349,81 @@ def cmd_space_sync_catchup_media() -> None:
     #    federation outbox add a few seconds. Be generous.
     time.sleep(30)
 
+    # 7b. METADATA first — the rows, not just the bytes (#648).
+    #
+    # This step used to assert only that the image *bytes* landed on d,
+    # which is why #648 shipped: media travels a durable retry outbox
+    # (``space_media_outbox`` rows with attempts + backoff) and
+    # self-heals, while the §25.6 metadata stream is one-shot,
+    # in-memory, fire-and-forget. A mesh member could therefore end up
+    # with the space, the content key and every byte on disk, and zero
+    # post rows — a space that renders empty — with every assertion
+    # here still green. Assert the rows.
+    d_post_ids = _rows(
+        "d",
+        "SELECT id FROM space_posts WHERE space_id = ?",
+        (space_id,),
+    )
+    if post_id not in {r[0] for r in d_post_ids}:
+        raise SystemExit(
+            f"space-sync-catchup-media: d has no space_posts row for the "
+            f"pre-invite post {post_id} (saw {[r[0] for r in d_post_ids]}) — "
+            f"the catch-up delivered media bytes but no metadata",
+        )
+    print(f"  d.space_posts has pre-invite post {post_id} ✓ (catch-up)")
+
+    # The system ("Posts") album MUST arrive — it carries the host's own id
+    # and is what mirrored post images live in on the joiner's side.
+    d_albums = {r[0] for r in _rows(
+        "d",
+        "SELECT id FROM gallery_albums WHERE space_id = ?",
+        (space_id,),
+    )}
+    c_system = {r[0] for r in _rows(
+        "c",
+        "SELECT id FROM gallery_albums WHERE space_id = ? AND is_system = 1",
+        (space_id,),
+    )}
+    if not c_system <= d_albums:
+        raise SystemExit(
+            f"space-sync-catchup-media: d is missing the host's system gallery "
+            f"album {sorted(c_system - d_albums)} (has {sorted(d_albums)})",
+        )
+    print("  d.gallery_albums has the host's system album ✓ (catch-up)")
+
+    # NOT asserted: the user-created album ``album_id`` and its items.
+    # They genuinely do NOT arrive, and the cause is a schema bug that is
+    # independent of the mesh — see issue #650. ``gallery_albums.owner_user_id``
+    # and ``gallery_items.uploaded_by`` both carry
+    # ``REFERENCES users(user_id)``, which a REMOTE owner can never satisfy,
+    # so the receiver's ``create_album`` raises and ``_persist_album``
+    # swallows it. Federated content elsewhere avoids this by design
+    # (``space_posts.author`` is a bare ``TEXT NOT NULL``, no FK, precisely
+    # because the author may live on another household). Fixing it means
+    # rebuilding two tables to drop the FKs, so it gets its own PR + its own
+    # migration audit rather than riding along here. The system album above
+    # only lands because its ``owner_user_id`` is NULL.
+    # When #650 lands, re-add:
+    #     assert album_id in d_albums
+    #     assert the album's item row exists on d
+
+    # The REST surface must agree with the DB — that's what a user sees.
+    s, feed = _request(
+        f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/feed",
+        token=d["token"],
+    )
+    _must("d reads the space feed", s, feed, ok=(200,))
+    # ``/feed`` returns either ``{"posts": [...]}`` or a bare list depending
+    # on the route revision — same tolerance cmd_sync_https_fallback applies.
+    feed_posts = feed.get("posts") if isinstance(feed, dict) else feed
+    feed_ids = {p.get("id") for p in (feed_posts or [])}
+    if post_id not in feed_ids:
+        raise SystemExit(
+            f"space-sync-catchup-media: d's /feed omits the pre-invite post "
+            f"{post_id} (saw {sorted(i for i in feed_ids if i)})",
+        )
+    print("  d GET /feed surfaces the pre-invite post ✓")
+
     # 8. Bytes for the pre-invite post image MUST land on d.
     d_post_path = _instance_dir("d") / "media" / post_filename
     if not d_post_path.is_file():
@@ -4328,6 +4476,9 @@ def cmd_space_sync_catchup_media() -> None:
 
     state["space_sync_catchup_media_ran"] = True
     state["space_sync_catchup_media_space_id"] = space_id
+    # sync-https-fallback re-checks this after dave's restart to tell a
+    # real sync stream apart from an outbox redelivery of the new post.
+    state["space_sync_catchup_media_post_id"] = post_id
     _save(state)
     print("space-sync-catchup-media: ok")
 
@@ -4662,6 +4813,23 @@ def _accept_remote_invite(state: dict, joiner: str, space_id: str) -> None:
         method="POST",
     )
     _must(f"{joiner}: accept invite", s, body, ok=(204,))
+
+
+def _rows(label: str, sql: str, params: tuple = ()) -> list[tuple]:
+    """Run a read-only query against ``label``'s SQLite DB.
+
+    Several steps assert on rows the REST surface doesn't expose (or
+    exposes only for local users), so they read the DB directly. Kept
+    read-only on purpose — the harness never writes app state behind the
+    backend's back except for the documented home-coordinate seed.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(_instance_dir(label) / "socialhome.db")
+    try:
+        return list(conn.execute(sql, params))
+    finally:
+        conn.close()
 
 
 def _space_col(label: str, space_id: str, col: str):

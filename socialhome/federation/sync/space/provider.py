@@ -29,6 +29,13 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+#: Consecutive failed chunk ships after which ``stream_initial`` gives up.
+#: Each attempt on the mesh path costs a BFS plus a 3-hop signed round, so
+#: continuing to push into a broken path is pure cost — the requester's
+#: re-BEGIN is what recovers the stream (#648).
+MAX_CONSECUTIVE_CHUNK_FAILURES: int = 3
+
+
 class SpaceSyncService:
     """Streams encrypted space content over a negotiated DataChannel."""
 
@@ -88,6 +95,7 @@ class SpaceSyncService:
         """
         sync_id = session.sync_id
         space_id = session.space_id
+        consecutive_failures = 0
         try:
             for resource in RESOURCE_ORDER:
                 exporter = self._exporters.get(resource)
@@ -100,7 +108,20 @@ class SpaceSyncService:
                     sync_id=sync_id,
                     sig_suite=self._sig_suite,
                 ):
-                    await self._send(session, envelope)
+                    if await self._send(session, envelope):
+                        consecutive_failures = 0
+                        continue
+                    consecutive_failures += 1
+                    if consecutive_failures >= MAX_CONSECUTIVE_CHUNK_FAILURES:
+                        log.warning(
+                            "sync %s: abandoning stream for space %s after "
+                            "%d consecutive chunk failures — the requester "
+                            "must re-BEGIN to get this metadata",
+                            sync_id,
+                            space_id,
+                            consecutive_failures,
+                        )
+                        return
             sentinel = await self._builder.build_sentinel(
                 space_id=space_id,
                 sync_id=sync_id,
@@ -303,8 +324,14 @@ class SpaceSyncService:
                 resource,
             )
 
-    async def _send(self, session, envelope: dict[str, Any]) -> None:
+    async def _send(self, session, envelope: dict[str, Any]) -> bool:
         """Serialise and dispatch one envelope to the requester.
+
+        Returns ``True`` when the envelope was handed off successfully.
+        A ``False`` return means the requester will be missing this chunk;
+        callers count consecutive failures and abandon the stream rather
+        than spending a full BFS-plus-3-hop round per remaining chunk on a
+        path that is not working (#648).
 
         Picks the transport based on ``session.transport_mode``:
 
@@ -328,7 +355,7 @@ class SpaceSyncService:
                     f"SyncSessionRecord {session.sync_id} has no rtc handle",
                 )
             await rtc_session.send_chunk(serialise_chunk(envelope))
-            return
+            return True
         if mode == "https":
             if self._federation is None:
                 raise RuntimeError(
@@ -367,9 +394,13 @@ class SpaceSyncService:
                     "will be missing metadata",
                     session.sync_id,
                     session.requester_instance_id,
-                    getattr(result, "reason", None),
+                    # ``DeliveryResult`` carries ``error``; the original
+                    # ``reason`` spelling made this diagnostic always print
+                    # ``None`` — for exactly the failure it exists to report.
+                    getattr(result, "error", None),
                 )
-            return
+                return False
+            return True
         raise ValueError(
             f"Unknown transport_mode {mode!r} on session {session.sync_id}",
         )

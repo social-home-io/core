@@ -145,8 +145,13 @@ class SpaceSyncReceiver:
         *,
         from_instance: str,
     ) -> None:
-        """Handle one DataChannel frame. All failure modes log + return —
-        the federation service has already verified the peer is paired."""
+        """Handle one chunk (DataChannel frame or routed federation event).
+
+        All failure modes log + return. Note the sender is NOT necessarily
+        a paired peer: a mesh-joined member receives its catch-up stream
+        from a host it has no pairing with, so this method authenticates
+        the chunk itself rather than assuming the transport already did
+        (see the signature-verification block below, and #648)."""
         try:
             envelope = parse_chunk(raw)
         except ValueError as exc:
@@ -160,25 +165,73 @@ class SpaceSyncReceiver:
             log.debug("sync chunk missing required outer fields")
             return
 
-        # Signature verification — peer's identity key from the federation
-        # repo; allows tampered sessions to be dropped here rather than
-        # later on the persist path.
+        # Signature verification — the sender's Ed25519 identity key, so a
+        # tampered chunk is dropped here rather than on the persist path.
+        #
+        # Two sources, in order:
+        #
+        # 1. The ``remote_instances`` row, for a host we are paired with.
+        # 2. The space stub's ``host_identity_pk``, for a host we are NOT
+        #    paired with. A member that joined over the MESH has no
+        #    ``remote_instances`` row at all, so source 1 returns None and
+        #    this used to ``return`` — silently, at DEBUG — discarding every
+        #    chunk of the catch-up stream and leaving the joiner with the
+        #    space, the content key and the media bytes but no post or
+        #    gallery metadata (#648). The key is space-scoped and was stored
+        #    only after ``derive_instance_id(pk) == sender`` passed on the
+        #    sealed invite, so it authorises exactly one thing: signatures
+        #    on content for this space.
+        #
+        # The old docstring claimed "the federation service has already
+        # verified the peer is paired". That holds for a direct chunk and is
+        # false for a mesh-routed one — which is why this is checked here.
         peer = await self._federation_repo.get_instance(from_instance)
-        if peer is None:
-            log.debug("sync chunk from unknown instance %s — dropping", from_instance)
-            return
+        ed_public_key: bytes | None = None
+        sig_suite = "ed25519"
+        pq_pk: bytes | None = None
+        if peer is not None:
+            sig_suite = peer.sig_suite
+            ed_public_key = bytes.fromhex(peer.remote_identity_pk)
+            pq_pk_hex = peer.remote_pq_identity_pk
+            pq_pk = bytes.fromhex(pq_pk_hex) if pq_pk_hex else None
+        else:
+            host_pk_hex = await self._space_repo.get_host_identity_pk(space_id)
+            space = await self._space_repo.get(space_id)
+            # Only the household this stub says hosts the space may sign its
+            # content. Without this, any unpaired instance whose chunks
+            # mentioned the space id would be verified against the host's key
+            # — it would fail the signature check, but the identity binding
+            # belongs here, explicitly, not as a side effect.
+            if (
+                not host_pk_hex
+                or space is None
+                or space.owner_instance_id != from_instance
+            ):
+                log.debug(
+                    "sync chunk from unknown instance %s for space %s — "
+                    "no paired-peer row and no matching host key; dropping",
+                    from_instance,
+                    space_id,
+                )
+                return
+            try:
+                ed_public_key = bytes.fromhex(host_pk_hex)
+            except ValueError:
+                log.warning(
+                    "sync chunk: stored host_identity_pk for space %s is not "
+                    "valid hex — dropping",
+                    space_id,
+                )
+                return
 
         signatures = envelope.get("signatures") or {}
-        sig_suite = peer.sig_suite
         envelope_for_verify = {k: v for k, v in envelope.items() if k != "signatures"}
         bytes_for_verify = _orjson.dumps(envelope_for_verify)
-        pq_pk_hex = peer.remote_pq_identity_pk
-        pq_pk = bytes.fromhex(pq_pk_hex) if pq_pk_hex else None
         ok = self._encoder.verify_signatures_all(
             bytes_for_verify,
             suite=sig_suite,
             signatures=signatures,
-            ed_public_key=bytes.fromhex(peer.remote_identity_pk),
+            ed_public_key=ed_public_key,
             pq_public_key=pq_pk,
         )
         if not ok:

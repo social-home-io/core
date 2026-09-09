@@ -175,6 +175,29 @@ The target generates a fresh ephemeral on each `SPACE_FIND_ROUTE`
 probe and ships the public via `SPACE_ROUTE_FOUND`; the origin
 generates its own ephemeral on `send_routed` and stashes the priv
 for the matching reply. Relays only ever see the opaque ciphertext.
+
+Both halves live **in memory only** and are bounded by
+`DEFAULT_TARGET_EPH_TTL_S` (300 s) measured from the moment the key is
+*minted* — never extended on use. That is a deliberate forward-secrecy
+bound: a long-lived routed interaction re-keys by running a fresh
+discovery, which rotates the ephemeral, rather than by keeping one warm.
+Two invariants follow, and both were violated before #648:
+
+* The origin's route cache (which holds the `target_eph_pk` it seals
+  under) MUST expire *before* the target's private half. Its TTL is
+  therefore derived — `ROUTE_CACHE_TTL_S = DEFAULT_TARGET_EPH_TTL_S -
+  ROUTE_CACHE_SAFETY_MARGIN_S` — and anchored on the moment the probe
+  was *sent*, since the target minted its key strictly after that. If
+  the origin's window can outlive the target's, the origin keeps sealing
+  under a key the target has dropped, and the target discards every
+  envelope in silence (there is no NACK, and the send already reported
+  success).
+* Because the private half dies with the process, a target that
+  **restarts** invalidates every pub an origin holds for it. Recovery is
+  re-discovery, not a longer-lived key: a host admitting a
+  `SPACE_SYNC_BEGIN` from a mesh-only requester drops its cached route
+  to that requester first, so the stream is sealed under a key minted by
+  the requester's current process.
 The wire carries a `kem_suite` field (today only `"x25519"`) so a
 future hybrid (`x25519+mlkem768`, Phase 2) is a suite-bump rather
 than a wire-format break — see [`protocol/spaces.md` → "Mesh

@@ -1183,6 +1183,10 @@ def _make_mesh_pair(
     send_routed = AsyncMock(return_value="route-id-mock")
     route_service = MagicMock()
     route_service.discover_route = discover_route
+    # ``invalidate`` is awaited on the #648 paths (mesh BEGIN admission and
+    # the retry after a failed routed ship), so it must be an AsyncMock —
+    # a bare MagicMock attribute would return a non-awaitable.
+    route_service.invalidate = AsyncMock()
     routed_handler = MagicMock()
     routed_handler.send_routed = send_routed
     return route_service, routed_handler, discover_route, send_routed
@@ -2709,3 +2713,127 @@ async def test_is_confirmed_peer_false_for_pending_or_unknown():
     assert await svc.is_confirmed_peer(pending.id) is False
     assert await svc.is_confirmed_peer("nope") is False
     assert await svc.is_confirmed_peer("") is False
+
+
+# ── #648: a failed routed ship re-probes once ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_routed_ship_failure_invalidates_and_retries_once():
+    """A failed routed ship drops the cached path and retries on a fresh one.
+
+    ``discover_route`` is cache-first, so a bare retry would re-use the
+    same dead chain — the ``invalidate`` is what makes the retry mean
+    anything. This is that method's first production caller.
+    """
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    outbox_repo = InMemoryOutboxRepo()
+    inst, _ = _make_remote_instance(km)
+    inst = dataclasses.replace(inst, status=PairingStatus.PENDING_SENT)
+    await fed_repo.save_instance(inst)
+
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox_repo,
+        key_manager=km,
+    )
+    dead_path = [svc.own_instance_id, "dead-hop", inst.id]
+    live_path = [svc.own_instance_id, "live-hop", inst.id]
+    route_service, routed_handler, discover_route, send_routed = _make_mesh_pair(
+        route=(dead_path, "dead-eph"),
+    )
+    # First discovery hands back the dead path, the retry a fresh one.
+    discover_route.side_effect = [
+        (dead_path, "dead-eph"),
+        (live_path, "live-eph"),
+    ]
+    # First ship raises (relay gone), the retry succeeds.
+    send_routed.side_effect = [RuntimeError("relay unreachable"), "route-id"]
+    svc.attach_mesh(route_service=route_service, routed_handler=routed_handler)
+
+    result = await svc.send_with_mesh_fallback(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.SPACE_SYNC_CHUNK,
+        payload={"sync_id": "s1", "chunk": "{}"},
+    )
+
+    assert result.ok is True
+    route_service.invalidate.assert_awaited_once_with(inst.id)
+    assert discover_route.await_count == 2
+    assert send_routed.await_count == 2
+    # The retry went out on the freshly-discovered path, not the dead one.
+    assert send_routed.await_args.kwargs["path"] == live_path
+    assert send_routed.await_args.kwargs["target_eph_pk_b64"] == "live-eph"
+
+
+@pytest.mark.asyncio
+async def test_routed_ship_failure_gives_up_after_one_retry():
+    """The retry is non-recursive — two failures end it.
+
+    A recursive retry would let one persistently-broken target amplify a
+    single send into an unbounded probe storm across the mesh.
+    """
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    outbox_repo = InMemoryOutboxRepo()
+    inst, _ = _make_remote_instance(km)
+    inst = dataclasses.replace(inst, status=PairingStatus.PENDING_SENT)
+    await fed_repo.save_instance(inst)
+
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox_repo,
+        key_manager=km,
+    )
+    path = [svc.own_instance_id, "hop", inst.id]
+    route_service, routed_handler, discover_route, send_routed = _make_mesh_pair(
+        route=(path, "eph"),
+    )
+    send_routed.side_effect = RuntimeError("still broken")
+    svc.attach_mesh(route_service=route_service, routed_handler=routed_handler)
+
+    result = await svc.send_with_mesh_fallback(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.SPACE_SYNC_CHUNK,
+        payload={"sync_id": "s1", "chunk": "{}"},
+    )
+
+    assert result.ok is False
+    assert result.error == "routed_send_failed"
+    assert send_routed.await_count == 2, "retried more than once"
+    route_service.invalidate.assert_awaited_once_with(inst.id)
+
+
+@pytest.mark.asyncio
+async def test_routed_ship_failure_reports_no_route_when_rediscovery_fails():
+    """If the forced re-discovery finds nothing, say so rather than retrying."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    outbox_repo = InMemoryOutboxRepo()
+    inst, _ = _make_remote_instance(km)
+    inst = dataclasses.replace(inst, status=PairingStatus.PENDING_SENT)
+    await fed_repo.save_instance(inst)
+
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox_repo,
+        key_manager=km,
+    )
+    path = [svc.own_instance_id, "hop", inst.id]
+    route_service, routed_handler, discover_route, send_routed = _make_mesh_pair(
+        route=(path, "eph"),
+    )
+    discover_route.side_effect = [(path, "eph"), None]
+    send_routed.side_effect = RuntimeError("relay unreachable")
+    svc.attach_mesh(route_service=route_service, routed_handler=routed_handler)
+
+    result = await svc.send_with_mesh_fallback(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.SPACE_SYNC_CHUNK,
+        payload={"sync_id": "s1", "chunk": "{}"},
+    )
+
+    assert result.ok is False
+    assert result.error == "no_route"
+    assert send_routed.await_count == 1

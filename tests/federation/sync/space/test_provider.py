@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from typing import Any
 
 import orjson
@@ -14,7 +16,10 @@ from socialhome.federation.sync.space.exporter import (
     SENTINEL_RESOURCE,
     parse_chunk,
 )
-from socialhome.federation.sync.space.provider import SpaceSyncService
+from socialhome.federation.sync.space.provider import (
+    MAX_CONSECUTIVE_CHUNK_FAILURES,
+    SpaceSyncService,
+)
 
 
 class _FakeExporter:
@@ -501,3 +506,69 @@ async def test_stream_initial_catchup_logic_bug_propagates(encoder, caplog):
     # And — critically — no enqueue happened, because the bug short-
     # circuited before any successful walk.
     assert media_sync.enqueue_for_blob.await_count == 0
+
+
+# ─── #648: don't push into a broken path forever ──────────────────────
+
+
+async def test_stream_initial_abandons_after_consecutive_chunk_failures(provider):
+    """A stream whose chunks keep failing is abandoned, not completed.
+
+    Each attempt on the mesh path costs a BFS plus a 3-hop signed round,
+    so continuing to push a whole space's metadata into a path that is not
+    working is pure cost. Recovery is the requester's re-BEGIN.
+    """
+    from unittest.mock import AsyncMock
+
+    session = _FakeSession()
+    session.rtc = None
+    session.transport_mode = "https"
+
+    federation = AsyncMock()
+    federation.send_with_mesh_fallback = AsyncMock(
+        return_value=SimpleNamespace(ok=False, error="no_route"),
+    )
+    provider.attach_federation(federation)
+
+    await provider.stream_initial(session)
+
+    assert (
+        federation.send_with_mesh_fallback.await_count == MAX_CONSECUTIVE_CHUNK_FAILURES
+    ), "kept streaming past the failure budget"
+
+
+async def test_stream_initial_failure_budget_resets_on_success(provider):
+    """An isolated failure doesn't abandon a stream that recovers."""
+    from unittest.mock import AsyncMock
+
+    session = _FakeSession()
+    session.rtc = None
+    session.transport_mode = "https"
+
+    ok = SimpleNamespace(ok=True, error=None)
+    bad = SimpleNamespace(ok=False, error="routed_send_failed")
+
+    # Baseline: how many sends a fully-successful stream makes.
+    clean = AsyncMock()
+    clean.send_with_mesh_fallback = AsyncMock(return_value=ok)
+    provider.attach_federation(clean)
+    await provider.stream_initial(session)
+    expected = clean.send_with_mesh_fallback.await_count
+    assert expected > 1
+
+    # Now alternate failure/success so the run never accumulates MAX in a
+    # row. The stream must still make every send a clean run makes.
+    federation = AsyncMock()
+    federation.send_with_mesh_fallback = AsyncMock(
+        side_effect=([bad, ok] * expected) + [ok] * expected,
+    )
+    provider.attach_federation(federation)
+
+    second = _FakeSession()
+    second.rtc = None
+    second.transport_mode = "https"
+    await provider.stream_initial(second)
+
+    assert federation.send_with_mesh_fallback.await_count == expected, (
+        "an isolated failure aborted a stream that was recovering"
+    )

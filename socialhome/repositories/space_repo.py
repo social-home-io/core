@@ -51,6 +51,8 @@ class AbstractSpaceRepo(Protocol):
     async def set_space_seed(self, space_id: str, seed: bytes) -> None: ...
     async def set_space_pubkey(self, space_id: str, public_key_hex: str) -> None: ...
     async def get_space_seed(self, space_id: str) -> bytes | None: ...
+    async def set_host_identity_pk(self, space_id: str, pk_hex: str) -> None: ...
+    async def get_host_identity_pk(self, space_id: str) -> str | None: ...
     async def set_cover_hash(
         self,
         space_id: str,
@@ -544,6 +546,39 @@ class SqliteSpaceRepo:
         if wrapped is None:
             return None
         return self._kek.decrypt(wrapped, associated_data=space_id.encode("utf-8"))
+
+    async def set_host_identity_pk(self, space_id: str, pk_hex: str) -> None:
+        """Record the hosting household's Ed25519 identity pubkey (hex).
+
+        Only meaningful on a *stub* of a remote space whose host we are not
+        paired with: the §25.6 receiver needs it to verify the host's
+        per-chunk signatures, and a mesh-joined member has no
+        ``remote_instances`` row to read one from (#648).
+
+        Callers MUST have verified that ``derive_instance_id(pk)`` matches
+        the space's authenticated host before storing — this method does
+        not re-check. Public key only; nothing secret goes in this column,
+        so unlike :meth:`set_space_seed` it is not KEK-wrapped.
+        """
+        await self._db.enqueue(
+            "UPDATE spaces SET host_identity_pk=? WHERE id=?",
+            (pk_hex, space_id),
+        )
+
+    async def get_host_identity_pk(self, space_id: str) -> str | None:
+        """Return the host household's identity pubkey (hex), or ``None``.
+
+        ``None`` for an owned space, for a stub whose host is a confirmed
+        peer (the ``remote_instances`` row serves those), and for stubs
+        seated before migration 0045.
+        """
+        row = await self._db.fetchone(
+            "SELECT host_identity_pk FROM spaces WHERE id=?",
+            (space_id,),
+        )
+        if row is None:
+            return None
+        return row["host_identity_pk"]
 
     async def list_by_type(self, space_type: SpaceType) -> list[Space]:
         rows = await self._db.fetchall(

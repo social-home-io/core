@@ -832,6 +832,37 @@ to forward back through itself, and gates forwards on
 mesh. ROUTE_FOUND responses ride back along the cached caller chain
 (``request_id → caller_instance_id``, TTL 60 s).
 
+#### Cache lifetimes are ordered, not equal
+
+The target's cached ephemeral **private** half and the origin's cached
+`(path, target_eph_pk)` are two different timers on two different
+households, and the ordering between them is load-bearing:
+
+| Side | Constant | Anchored on |
+|---|---|---|
+| target | `routed_crypto.DEFAULT_TARGET_EPH_TTL_S` (300 s) | key mint, on answering the probe |
+| origin | `route_discovery.ROUTE_CACHE_TTL_S` (= 300 s − `ROUTE_CACHE_SAFETY_MARGIN_S`) | the moment the probe was **sent** |
+
+The origin's window MUST close first. `discover_route` is cache-first,
+so an origin whose window outlives the target's keeps re-sealing under
+a private half the target has already dropped — and the target's only
+recourse is to discard the envelope, silently: there is no NACK, and
+`send_with_mesh_fallback` reported `ok=True` the moment the first hop
+accepted the outer envelope. That is the mechanism behind #648. The
+origin TTL is derived from the target's rather than typed independently
+so the two cannot drift apart, and probe-start anchoring removes the
+discovery-latency overhang exactly.
+
+The private half also dies with the process, so a **restarted** target
+invalidates every pub an origin holds for it. Recovery is re-discovery
+(which rotates the ephemeral — the forward-secrecy-positive direction),
+never a longer-lived or use-extended key: a host admitting a
+`SPACE_SYNC_BEGIN` from a mesh-only requester calls
+`RouteDiscoveryService.invalidate()` for that requester before it starts
+streaming, so the stream is sealed under a key the requester's current
+process actually holds. See [`sync.md` → "Mesh-only host
+catch-up"](sync.md#mesh-only-host-catch-up).
+
 #### Authenticating `target_eph_pk` (v_21+)
 
 The origin seals real space content (post bodies, GPS, files, the §D2

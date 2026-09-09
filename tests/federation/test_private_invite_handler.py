@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.domain.events import (
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
@@ -1273,3 +1274,94 @@ async def test_attach_to_registers_handlers():
         FederationEventType.SPACE_MEMBER_JOINED,
         FederationEventType.SPACE_MEMBER_LEFT,
     }
+
+
+# ── #648: the host's identity key rides the sealed invite ─────────────
+
+
+def _host_identity() -> tuple[str, str]:
+    """Return ``(instance_id, identity_pk_hex)`` for a real keypair."""
+    kp = generate_identity_keypair()
+    return derive_instance_id(kp.public_key), kp.public_key.hex()
+
+
+def _invite_with(host_pk, *, space_id="sp-mesh"):
+    return {
+        "space_id": space_id,
+        "invite_token": "tkn",
+        "invitee_user_id": "u1",
+        "inviter_user_id": "u2",
+        "space_display_hint": "Board",
+        "host_identity_pk": host_pk,
+        # A stub is only seated when space_meta is present, and the key is
+        # recorded alongside it.
+        "space_meta": {"name": "Board"},
+    }
+
+
+async def test_invite_records_host_identity_pk_when_it_derives_to_sender(handler):
+    """The host's key is stored so mesh-routed sync chunks can be verified.
+
+    A mesh-joined member has no ``remote_instances`` row for the host, so
+    without this the §25.6 receiver drops every chunk (#648).
+    """
+    host_id, host_pk = _host_identity()
+    ev = _event("SPACE_PRIVATE_INVITE", _invite_with(host_pk), from_instance=host_id)
+
+    await handler.h._on_invite(ev)
+
+    handler.space_repo.set_host_identity_pk.assert_awaited_once_with("sp-mesh", host_pk)
+
+
+async def test_invite_refuses_host_identity_pk_that_derives_elsewhere(handler):
+    """A key that isn't the sender's own is refused.
+
+    An instance id IS the hash of its identity key, so a sender can only
+    ever assert its own real key — anything else is a bug or an attempt to
+    bind another household's identity to this space. Same binding v_21
+    uses for ``target_eph_pk``.
+    """
+    _host_id, someone_elses_pk = _host_identity()
+    ev = _event(
+        "SPACE_PRIVATE_INVITE",
+        _invite_with(someone_elses_pk),
+        from_instance="an-unrelated-instance-id",
+    )
+
+    await handler.h._on_invite(ev)
+
+    handler.space_repo.set_host_identity_pk.assert_not_awaited()
+
+
+async def test_invite_without_host_identity_pk_is_unchanged(handler):
+    """An older sender ships no key — previous behaviour, no write."""
+    host_id, _pk = _host_identity()
+    payload = _invite_with(None)
+    payload.pop("host_identity_pk")
+    ev = _event("SPACE_PRIVATE_INVITE", payload, from_instance=host_id)
+
+    await handler.h._on_invite(ev)
+
+    handler.space_repo.set_host_identity_pk.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "nothex!!",
+        "aabb",  # right charset, wrong length
+        1234,  # not a string at all
+    ],
+)
+async def test_invite_refuses_malformed_host_identity_pk(handler, bad):
+    """Malformed input is dropped, not stored and not raised."""
+    host_id, _pk = _host_identity()
+    ev = _event(
+        "SPACE_PRIVATE_INVITE",
+        _invite_with(bad),
+        from_instance=host_id,
+    )
+
+    await handler.h._on_invite(ev)
+
+    handler.space_repo.set_host_identity_pk.assert_not_awaited()

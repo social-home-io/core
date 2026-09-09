@@ -112,6 +112,17 @@ sequenceDiagram
 
 ### Private invite over the federation mesh (v_6+)
 
+The sealed `SPACE_PRIVATE_INVITE` payload carries `host_identity_pk` —
+the inviting household's Ed25519 identity public key. A mesh invitee never
+pairs with the host, so this is the only way it can later verify the
+host's signatures on the §25.6 catch-up stream; it is persisted on the
+space stub only when `derive_instance_id(pk)` matches the authenticated
+sender. Absent on an older sender (the field is additive, no capability
+bump — a receiver that finds it missing keeps the previous behaviour). See
+[`sync.md` → "Authenticating a chunk from an unpaired
+host"](sync.md#authenticating-a-chunk-from-an-unpaired-host).
+
+
 When the invitee's household is **not** directly paired with the
 admin, `SpaceService` falls back to mesh routing transparently —
 the four private-invite envelopes (`SPACE_PRIVATE_INVITE`,
@@ -120,7 +131,12 @@ the four private-invite envelopes (`SPACE_PRIVATE_INVITE`,
 via `SPACE_FIND_ROUTE` / `SPACE_ROUTE_FOUND`. Each direction is
 its own forward leg with a fresh discovery (the admin / invitee
 may take arbitrary time between actions, so we don't try to keep
-the reply-leg ephemerals warm). See [`spaces.md` → "Mesh routing
+the reply-leg ephemerals warm). The same rule holds for a routed
+leg that is *not* a short request/response — a §25.6 catch-up
+stream re-consults discovery per chunk and therefore re-keys
+through the origin's cache expiry rather than holding one
+ephemeral open for the whole stream (see
+[`../crypto.md`](../crypto.md) → "Routed-envelope seal"). See [`spaces.md` → "Mesh routing
 (SPACE_ROUTED)"](spaces.md#mesh-routing-space_routed) for the
 envelope shape; the inner event payload is unchanged.
 

@@ -27,9 +27,15 @@ content (see :mod:`socialhome.services.space_crypto_service`).
 * **No forward secrecy beyond the discovery window** — once the
   target's ephemeral private half expires from cache
   (``DEFAULT_TARGET_EPH_TTL_S``, default 300 s), subsequent redeems
-  force a fresh discovery + fresh ephemerals. The cap matches the
-  origin-side route-cache TTL so a re-send within the window doesn't
-  trigger an unnecessary re-discovery.
+  force a fresh discovery + fresh ephemerals. This is deliberate and
+  must not be relaxed by refreshing the key on use: the bound is
+  "mint + TTL", not "last use + TTL".
+  The origin-side route-cache TTL is strictly SHORTER (by
+  ``route_discovery.ROUTE_CACHE_SAFETY_MARGIN_S``) so the origin's
+  window always closes first. Ordering matters and used to be wrong —
+  if the origin can outlive the target, it keeps sealing under a
+  private half the target has already dropped, and the target discards
+  every envelope in silence (#648).
 * **PQ migration** — same shape as pairing's X25519 today; Phase 2
   of ``docs/crypto.md`` swaps in X25519+ML-KEM-768 hybrid here too.
   No wire change required — only the ``derive_directional_keys``
@@ -101,9 +107,11 @@ from ..crypto import (
 )
 
 
-#: Default TTL on the target's cached ephemeral private half. Matches
-#: the origin's route-cache TTL so a re-send within the same window
-#: doesn't trigger a re-discovery just to refresh the encryption key.
+#: Default TTL on the target's cached ephemeral private half, measured
+#: from the moment the key is MINTED (never extended on use — that would
+#: trade away the forward-secrecy bound documented above). Must stay
+#: strictly greater than the origin's route-cache TTL, which is derived
+#: from this value in ``route_discovery.ROUTE_CACHE_TTL_S``.
 DEFAULT_TARGET_EPH_TTL_S: float = 300.0
 
 #: KEM suite this build implements. PQ migration (Phase 2 of
