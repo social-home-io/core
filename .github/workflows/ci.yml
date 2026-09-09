@@ -59,7 +59,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - run: pip install ruff
+      # Pinned, NOT ``pip install ruff``. ruff's default rule set grows
+      # between minors, so an unpinned install silently re-lints the
+      # whole tree against whatever released most recently: 0.16 turned
+      # a green ``main`` into 2779 findings and failed every open PR
+      # without a line of code changing. ``.pre-commit-config.yaml``'s
+      # ``ruff-pre-commit`` rev is the source of truth — keep this, that
+      # rev, and pyproject's ``[dev]`` floor in lockstep.
+      - run: pip install ruff==0.15.11
       - name: ruff check
         run: ruff check socialhome/ tests/
       - name: ruff format
