@@ -680,6 +680,11 @@ export default function SpaceFeedPage() {
                   // event's span.
                   const e = entry.event
                   const rowKey = `${dayKey}:${e.id}`
+                  // Disclosure wiring — mirrors CalendarPage: the header
+                  // is a native <button>, the detail panel its sibling, and
+                  // the id stays a clean token (no ``:`` from ``rowKey``).
+                  const isOpen = selectedSpaceEventId.value === rowKey
+                  const detailId = `sh-event-detail-${dayKey}-${e.id}`
                   // One call, two labels — the helper builds two Dates
                   // and up to two Intl formatters per invocation.
                   const bounds = formatEventBounds(e)
@@ -691,17 +696,21 @@ export default function SpaceFeedPage() {
                       + (entry.isFirst ? '' : ' sh-event--continued')
                       + (entry.isLast ? '' : ' sh-event--continues')
                     }
-                    onClick={() => {
-                      selectedSpaceEventId.value =
-                        selectedSpaceEventId.value === rowKey ? null : rowKey
-                    }}
                   >
-                    <div class="sh-event-header">
+                    <button
+                      type="button"
+                      class="sh-event-header"
+                      aria-expanded={isOpen}
+                      aria-controls={detailId}
+                      onClick={() => {
+                        selectedSpaceEventId.value = isOpen ? null : rowKey
+                      }}
+                    >
                       <strong>{e.summary}</strong>
                       <EventRowMeta entry={entry} />
-                    </div>
-                    {selectedSpaceEventId.value === rowKey && (
-                      <div class="sh-event-detail">
+                    </button>
+                    {isOpen && (
+                      <div class="sh-event-detail" id={detailId}>
                         {e.description && <p>{e.description}</p>}
                         <div class="sh-event-times">
                           <span>{t('event.starts')} {bounds.starts}</span>
