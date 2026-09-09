@@ -34,6 +34,20 @@ import { normaliseTimestamp } from '@/utils/relativeTime'
 
 const messages = signal<Message[]>([])
 const loading = signal(true)
+/** Which conversation the thread page is showing right now, or ``null``
+ *  when no thread is open. Read by ``loadOlder`` — a callback outside
+ *  the load effect, so it can't see that effect's per-run ``cancelled``
+ *  closure — to decide whether its awaited page still belongs to the
+ *  thread on screen.
+ *
+ *  Module-level rather than a ``useRef``, because the realistic switch
+ *  is thread A → /dms → thread B and the inbox is its own route: the
+ *  page UNMOUNTS in between. A ref is recreated on the remount, so a
+ *  stale ``loadOlder`` closure would compare against its own dead copy
+ *  — still pinned at the old id — and let the write through. A plain
+ *  ``let`` rather than a signal because nothing renders from it and a
+ *  write must not schedule a re-render. */
+let activeConvId: string | null = null
 /** Page size for the lazy-load older-history fetch. The initial
  *  load uses a wider window (see ``DmThreadPage`` body); each
  *  follow-up "load older" page is this many messages. Backend caps
@@ -593,6 +607,12 @@ export default function DmThreadPage() {
     // looking at. The cleanup flips it, so each continuation re-checks
     // "am I still the active thread?" before touching any signal.
     let cancelled = false
+    // Publish the active thread for the out-of-effect callbacks
+    // (``loadOlder``). This effect is the one place that declares
+    // "this thread is now the active one" and it re-runs on every
+    // ``convId`` change, so it's the only correct home for the write —
+    // and it must land before the first ``await`` anywhere below.
+    activeConvId = convId
     loading.value = true
     // Reset the lazy-load + anchor state for the new thread. Without
     // this a re-entry would inherit the previous thread's divider or
@@ -942,6 +962,11 @@ export default function DmThreadPage() {
     })
     return () => {
       cancelled = true
+      // No thread is on screen once this runs — a page that lands now
+      // has nowhere it legitimately belongs. On a same-instance switch
+      // Preact runs this before the next effect, which then sets the
+      // new id, so the ordering is safe either way.
+      activeConvId = null
       offRead(); offNewMsg(); offMediaReady(); offMessageUpdated()
       offReaction()
       offUserOnline(); offUserIdle(); offUserOffline()
@@ -1709,11 +1734,23 @@ export default function DmThreadPage() {
     if (isLoadingOlder.value || !hasMoreHistory.value) return
     const oldest = messages.value[0]
     if (!oldest) return
+    // ``convId`` comes from the render closure, so an in-flight page
+    // belongs to whichever thread was on screen when the fetch went
+    // out. Capture it and re-check against the active thread after the
+    // await — see the bail-out below.
+    const myConv = convId
     isLoadingOlder.value = true
     try {
       const data: Message[] = await api.get(
-        `/api/conversations/${convId}/messages?before=${oldest.id}&limit=${PAGE_SIZE}`,
+        `/api/conversations/${myConv}/messages?before=${oldest.id}&limit=${PAGE_SIZE}`,
       ) ?? []
+      // Staleness guard. The user may have switched threads while this
+      // page was in flight, and every write below targets *module-level*
+      // signals — prepending here would splice the previous thread's
+      // history into the one the user is reading (and derive
+      // ``hasMoreHistory`` from the wrong page). Bail before ANY signal
+      // write, including the "no older history" branch just below.
+      if (myConv !== activeConvId) return
       const older = data.slice().reverse()
       if (older.length === 0) {
         hasMoreHistory.value = false
@@ -1731,7 +1768,12 @@ export default function DmThreadPage() {
       messages.value = [...fresh, ...messages.value]
       if (data.length < PAGE_SIZE) hasMoreHistory.value = false
     } finally {
-      isLoadingOlder.value = false
+      // Same reason the body bails: ``isLoadingOlder`` is a module-level
+      // signal shared across threads, and the load effect already reset
+      // it for the new thread. A stale page clearing it would kill the
+      // *new* thread's older-history spinner and re-arm ``handleScroll``
+      // to double-fetch the page it already has in flight.
+      if (myConv === activeConvId) isLoadingOlder.value = false
     }
   }
 
