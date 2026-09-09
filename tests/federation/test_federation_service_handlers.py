@@ -51,6 +51,10 @@ def svc():
     s._space_sync_service = None
     s._space_sync_receiver = None
     s._gfs_connection_service = None
+    # #648 — the mesh BEGIN path drops the cached route to the requester
+    # before streaming, and rejections go out over the mesh fallback.
+    s._route_service = None
+    s._routed_handler = None
     s._own_instance_id = "self-iid"
     s._own_identity_seed = b"\x00" * 32
     s._ice_servers = []
@@ -392,7 +396,13 @@ async def test_handle_space_sync_begin_no_gfs_service_no_signaling_node(svc):
 
 async def test_handle_space_sync_begin_rejected_sends_to_v20_peer(svc):
     """A non-member SPACE_SYNC_BEGIN from a v_20+ peer triggers a
-    SPACE_SYNC_REJECTED reply so the member can reconcile its stub."""
+    SPACE_SYNC_REJECTED reply so the member can reconcile its stub.
+
+    Routed through ``send_with_mesh_fallback`` rather than ``send_event``
+    (#648): a mesh-only requester is by definition not a CONFIRMED peer,
+    so a bare ``send_event`` reply is silence — and a requester met with
+    silence retries until it hits the rate limit.
+    """
     svc._sync_manager = MagicMock()
     svc._sync_manager.begin_session = AsyncMock(
         return_value=SimpleNamespace(
@@ -415,7 +425,7 @@ async def test_handle_space_sync_begin_rejected_sends_to_v20_peer(svc):
         ),
         patch.object(
             FederationService,
-            "send_event",
+            "send_with_mesh_fallback",
             new_callable=AsyncMock,
         ) as send_mock,
     ):
@@ -1170,3 +1180,130 @@ async def test_validate_inbound_media_invalid_is_stripped(svc):
     await svc._validate_inbound_media(ev)
     # Stripped.
     assert "file_meta" not in ev.payload
+
+
+# ── #648: the host re-probes before streaming to a mesh requester ─────
+
+
+async def test_mesh_begin_invalidates_cached_route_before_streaming(svc):
+    """A mesh BEGIN drops the host's cached route to the requester first.
+
+    Every chunk of the stream is sealed under the ``target_eph_pk`` the
+    host's route cache holds, but the private half only ever lived in the
+    requester's RAM. If the requester restarted, that pub is dead and the
+    host would seal the whole stream under it — chunks silently dropped on
+    arrival, metadata lost for good (the media path self-heals via its
+    durable outbox; the one-shot metadata stream does not).
+
+    A BEGIN is proof the requester is alive *now*, so the cached route is
+    dropped and the first chunk re-probes for a full-TTL key minted by the
+    requester's current process.
+    """
+    record = SimpleNamespace(sync_id="m2", rtc=None, transport_mode="rtc")
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(
+            accepted=True,
+            next_event=None,
+            next_payload=None,
+        ),
+    )
+    svc._sync_manager.get_session = MagicMock(return_value=record)
+    svc._space_sync_service = MagicMock()
+    svc._space_sync_service.stream_initial = AsyncMock()
+    svc._route_service = MagicMock()
+    svc._route_service.invalidate = AsyncMock()
+
+    with patch.object(
+        FederationService,
+        "is_confirmed_peer",
+        new_callable=AsyncMock,
+        return_value=False,
+    ):
+        await svc._handle_space_sync_begin(
+            _event(
+                "SPACE_SYNC_BEGIN",
+                {"sync_id": "m2", "space_id": "sp", "prefer_direct": False},
+                space_id="sp",
+            ),
+        )
+        await asyncio.sleep(0)
+
+    svc._route_service.invalidate.assert_awaited_once_with("peer-1")
+    svc._space_sync_service.stream_initial.assert_awaited_once_with(record)
+
+
+async def test_confirmed_peer_begin_leaves_route_cache_alone(svc):
+    """A CONFIRMED requester's BEGIN must not force a re-probe.
+
+    Its chunks go out over the direct path, which never touches a target
+    ephemeral, so invalidating would spend a pointless BFS per BEGIN.
+    """
+    record = SimpleNamespace(sync_id="m3", rtc=None, transport_mode="rtc")
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(
+            accepted=True,
+            next_event=None,
+            next_payload=None,
+        ),
+    )
+    svc._sync_manager.get_session = MagicMock(return_value=record)
+    svc._space_sync_service = MagicMock()
+    svc._space_sync_service.stream_initial = AsyncMock()
+    svc._route_service = MagicMock()
+    svc._route_service.invalidate = AsyncMock()
+
+    with patch.object(
+        FederationService,
+        "is_confirmed_peer",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        await svc._handle_space_sync_begin(
+            _event(
+                "SPACE_SYNC_BEGIN",
+                # prefer_direct=False → still the HTTPS branch, but the
+                # requester is a confirmed peer.
+                {"sync_id": "m3", "space_id": "sp", "prefer_direct": False},
+                space_id="sp",
+            ),
+        )
+        await asyncio.sleep(0)
+
+    svc._route_service.invalidate.assert_not_awaited()
+    svc._space_sync_service.stream_initial.assert_awaited_once_with(record)
+
+
+async def test_mesh_begin_survives_unwired_route_service(svc):
+    """No mesh attached → the stream still starts, no AttributeError."""
+    record = SimpleNamespace(sync_id="m4", rtc=None, transport_mode="rtc")
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(
+            accepted=True,
+            next_event=None,
+            next_payload=None,
+        ),
+    )
+    svc._sync_manager.get_session = MagicMock(return_value=record)
+    svc._space_sync_service = MagicMock()
+    svc._space_sync_service.stream_initial = AsyncMock()
+    svc._route_service = None
+
+    with patch.object(
+        FederationService,
+        "is_confirmed_peer",
+        new_callable=AsyncMock,
+        return_value=False,
+    ):
+        await svc._handle_space_sync_begin(
+            _event(
+                "SPACE_SYNC_BEGIN",
+                {"sync_id": "m4", "space_id": "sp", "prefer_direct": False},
+                space_id="sp",
+            ),
+        )
+        await asyncio.sleep(0)
+
+    svc._space_sync_service.stream_initial.assert_awaited_once_with(record)

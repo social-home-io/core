@@ -772,3 +772,36 @@ async def test_list_pending_join_request_space_ids_for_user_empty(env):
     assert (
         await env.repo.list_pending_join_request_space_ids_for_user("uid-alice") == []
     )
+
+
+async def test_host_identity_pk_round_trips(env):
+    """The mesh host's identity pubkey persists on the space stub (#648).
+
+    A member that joined over the mesh has no ``remote_instances`` row for
+    the host, so this column is the only place the §25.6 receiver can get
+    a key to verify the host's per-chunk signatures from.
+    """
+    await env.repo.save(_space("sp-mesh"))
+    assert await env.repo.get_host_identity_pk("sp-mesh") is None
+
+    await env.repo.set_host_identity_pk("sp-mesh", "cc" * 32)
+    assert await env.repo.get_host_identity_pk("sp-mesh") == "cc" * 32
+
+
+async def test_host_identity_pk_survives_a_resave(env):
+    """A later stub re-save (SPACE_CONFIG_CHANGED) must not clobber it.
+
+    The stub is upserted every time the host's config changes; losing the
+    key there would silently break sync again on the next config edit.
+    """
+    space = _space("sp-mesh")
+    await env.repo.save(space)
+    await env.repo.set_host_identity_pk("sp-mesh", "dd" * 32)
+
+    await env.repo.save(replace(space, name="Renamed"))
+
+    assert await env.repo.get_host_identity_pk("sp-mesh") == "dd" * 32
+
+
+async def test_host_identity_pk_is_none_for_unknown_space(env):
+    assert await env.repo.get_host_identity_pk("no-such-space") is None

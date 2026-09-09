@@ -1,0 +1,27 @@
+-- Ed25519 identity public key of the household HOSTING a remote space.
+--
+-- Needed because a member that joined over the federation MESH is not a
+-- paired peer of the host, so it has no ``remote_instances`` row and
+-- therefore no key to verify the host's per-chunk signatures with. The
+-- §25.6 sync receiver dropped every mesh-routed SPACE_SYNC_CHUNK at
+-- "sync chunk from unknown instance" (at DEBUG, so silently), leaving
+-- such a member with the space stub, the content key and the media bytes
+-- but zero post/gallery metadata — #648.
+--
+-- Deliberately space-scoped rather than a ``remote_instances`` row: that
+-- table's presence is what the §24.11 inbound pipeline gates on (it
+-- checks the row exists with a non-empty ``remote_identity_pk``, NOT that
+-- it is CONFIRMED), so seating one there would let an unpaired household
+-- deliver any event type straight to our inbox. Here the key authorises
+-- exactly one thing: signatures on content for the space it is stored on.
+--
+-- Populated on the invitee side from the *sealed* SPACE_PRIVATE_INVITE
+-- payload, and only when ``derive_instance_id(pk)`` equals the
+-- envelope's authenticated sender — the same check v_21 uses to
+-- authenticate ``target_eph_pk`` in ROUTE_FOUND, so the value can only
+-- ever be the identity the sender's instance id already commits to.
+--
+-- NULL for every owned space and for stubs seated before this migration
+-- (those hosts are direct peers, so the ``remote_instances`` lookup keeps
+-- serving them). Additive, no backfill.
+ALTER TABLE spaces ADD COLUMN host_identity_pk TEXT;

@@ -63,6 +63,29 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+#: Safety margin subtracted from :data:`routed_crypto.DEFAULT_TARGET_EPH_TTL_S`
+#: to get the origin-side route-cache TTL. The origin seals every routed
+#: payload under the ``target_eph_pk`` this cache holds, but the matching
+#: private half lives in the *target's* memory under its own TTL — so the
+#: origin's window MUST close first, or the origin keeps sealing under a key
+#: the target has already dropped and every envelope is silently discarded on
+#: arrival (#648). The margin covers one send's duration plus clock drift
+#: between the two households.
+ROUTE_CACHE_SAFETY_MARGIN_S: float = 30.0
+
+#: Origin-side route-cache TTL. Derived, never hand-tuned, so the invariant
+#: ``route cache TTL < target ephemeral TTL`` cannot drift apart in a later
+#: edit. Pinned by ``tests/federation/test_route_discovery.py``.
+ROUTE_CACHE_TTL_S: float = (
+    routed_crypto.DEFAULT_TARGET_EPH_TTL_S - ROUTE_CACHE_SAFETY_MARGIN_S
+)
+
+#: How long a target stays in the negative-result cooldown after a discovery
+#: found no route. Without it, a caller in a per-chunk retry loop re-floods
+#: every mesh-capable peer for each chunk.
+ROUTE_NEGATIVE_COOLDOWN_S: float = 30.0
+
+
 #: Required peer ``proto_version`` for participating in mesh routing.
 #: Anything below v_6 doesn't know SPACE_FIND_ROUTE / SPACE_ROUTED.
 _MIN_MESH_PROTO_VERSION = FederationCapability.MIN_FOR_SPACE_INVITE_REDEEM
@@ -177,6 +200,8 @@ class RouteDiscoveryService:
         "_caller_cache",
         "_route_cache",
         "_target_eph_state",
+        "_inflight",
+        "_negative_until",
     )
 
     def __init__(
@@ -185,7 +210,7 @@ class RouteDiscoveryService:
         federation_service: "FederationService",
         federation_repo: "AbstractFederationRepo",
         max_hops: int = 3,
-        cache_ttl_s: float = 300.0,
+        cache_ttl_s: float = ROUTE_CACHE_TTL_S,
         seen_ttl_s: float = 60.0,
         discovery_timeout_s: float = 2.0,
     ) -> None:
@@ -198,9 +223,14 @@ class RouteDiscoveryService:
         #: TTL on cached *target-side* ephemeral private halves. The
         #: target mints a fresh keypair per FIND_ROUTE it answers and
         #: keeps the priv around for this long so the inbound
-        #: SPACE_ROUTED can be unsealed. Matches the route-cache TTL
-        #: on the origin side so a re-send within the window doesn't
-        #: trigger an unnecessary re-discovery.
+        #: SPACE_ROUTED can be unsealed. Deliberately LONGER than the
+        #: origin-side route-cache TTL by
+        #: :data:`ROUTE_CACHE_SAFETY_MARGIN_S` — an earlier revision of
+        #: this comment claimed the two "match", which was both untrue
+        #: (the origin stamped its window at resolve time, strictly
+        #: after the target minted) and the wrong shape: if the origin's
+        #: window can outlive the target's, the origin seals under a
+        #: dead key and the target drops the envelope in silence (#648).
         self._target_eph_ttl_s = routed_crypto.DEFAULT_TARGET_EPH_TTL_S
 
         #: ``request_id`` → in-flight bookkeeping (origin side).
@@ -212,6 +242,14 @@ class RouteDiscoveryService:
         #: Lets a relay route the ROUTE_FOUND response back along the
         #: same chain the FIND_ROUTE traversed.
         self._caller_cache: dict[str, tuple[str, float]] = {}
+        #: target_instance_id → in-flight discovery. Without this a
+        #: caller in a per-chunk loop (the §25.6 catch-up stream) floods
+        #: every mesh-capable peer once per chunk; with it, concurrent
+        #: callers for the same target share one probe.
+        self._inflight: dict[str, asyncio.Future] = {}
+        #: target_instance_id → monotonic deadline before which we won't
+        #: re-probe after a discovery that found no route.
+        self._negative_until: dict[str, float] = {}
         #: target_instance_id → cached path (origin side).
         self._route_cache: dict[str, _CachedRoute] = {}
         #: target-eph-pub-b64 → ``(target_eph_priv_b64, expires_at)``.
@@ -284,7 +322,57 @@ class RouteDiscoveryService:
             )
             return list(local_path), target_eph_pk_b64
 
-        # 3) Flood probes to each mesh-capable confirmed peer. (Note:
+        # 3) Negative-result cooldown — a target we just failed to
+        # reach doesn't get re-flooded on the very next chunk.
+        cooldown_until = self._negative_until.get(target_instance_id)
+        if cooldown_until is not None and cooldown_until > now:
+            return None
+
+        # 4) Single-flight. Concurrent callers for the same target share
+        # one flood instead of each spraying every mesh-capable peer.
+        # ``shield`` so one caller's cancellation doesn't kill the probe
+        # the others are still waiting on.
+        inflight = self._inflight.get(target_instance_id)
+        if inflight is not None and not inflight.done():
+            return await asyncio.shield(inflight)
+
+        fut: asyncio.Future[tuple[list[str], str] | None]
+        fut = asyncio.get_event_loop().create_future()
+        self._inflight[target_instance_id] = fut
+        try:
+            result = await self._flood_discover(
+                target_instance_id=target_instance_id,
+                now=now,
+                self_id=self_id,
+            )
+        except BaseException:
+            # Hand waiters a plain "no route" rather than the exception —
+            # re-raising into every shielded waiter would also leave an
+            # unretrieved-exception warning on the future nobody awaits.
+            if not fut.done():
+                fut.set_result(None)
+            raise
+        else:
+            if not fut.done():
+                fut.set_result(result)
+            return result
+        finally:
+            self._inflight.pop(target_instance_id, None)
+
+    async def _flood_discover(
+        self,
+        *,
+        target_instance_id: str,
+        now: float,
+        self_id: str,
+    ) -> tuple[list[str], str] | None:
+        """BFS-flood for ``target_instance_id`` and cache the winner.
+
+        Split out of :meth:`discover_route` so the latter can single-flight
+        it; ``now`` is the caller's probe-start timestamp, which is what the
+        cache window is anchored on (see :data:`ROUTE_CACHE_SAFETY_MARGIN_S`).
+        """
+        # Flood probes to each mesh-capable confirmed peer. (Note:
         # there is no direct-peer short-circuit anymore — the BFS
         # resolves in one hop against a direct peer and produces the
         # target's ephemeral pub the seal needs.)
@@ -353,13 +441,22 @@ class RouteDiscoveryService:
             if pending is not None:
                 pending.resolved = True
 
-        if result is not None:
-            path, target_eph_pk_b64 = result
-            self._route_cache[target_instance_id] = _CachedRoute(
-                path=list(path),
-                target_eph_pk=target_eph_pk_b64,
-                expires_at=time.monotonic() + self._cache_ttl_s,
+        if result is None:
+            self._negative_until[target_instance_id] = (
+                time.monotonic() + ROUTE_NEGATIVE_COOLDOWN_S
             )
+            return None
+        path, target_eph_pk_b64 = result
+        self._route_cache[target_instance_id] = _CachedRoute(
+            path=list(path),
+            target_eph_pk=target_eph_pk_b64,
+            # Anchored on the moment the probe was SENT, not on resolution.
+            # The target minted its ephemeral strictly after our probe left,
+            # so probe-start anchoring removes the discovery-latency term
+            # exactly and keeps our window inside the target's (#648).
+            expires_at=now + self._cache_ttl_s,
+        )
+        self._negative_until.pop(target_instance_id, None)
         return result
 
     async def invalidate(self, target_instance_id: str) -> None:
@@ -371,6 +468,10 @@ class RouteDiscoveryService:
         signal), so we don't keep retrying a dead chain.
         """
         self._route_cache.pop(target_instance_id, None)
+        # Also lift the negative cooldown: ``invalidate`` is an explicit
+        # "this path is known-bad, go look again" signal, and leaving the
+        # cooldown in place would swallow the very next probe.
+        self._negative_until.pop(target_instance_id, None)
 
     def lookup_target_eph_priv(self, pub_b64: str) -> str | None:
         """Return the cached target-ephemeral *private* half for ``pub_b64``.
@@ -806,4 +907,12 @@ class RouteDiscoveryService:
             self._target_eph_state = cap_by_expiry(
                 {k: v for k, v in self._target_eph_state.items() if v[1] > now},
                 key=lambda kv: kv[1][1],
+            )
+        if self._negative_until:
+            # Same defense-in-depth as the dicts above: a caller asking us
+            # to route to a stream of unknown targets would otherwise grow
+            # this one without bound, since every miss adds an entry.
+            self._negative_until = cap_by_expiry(
+                {k: v for k, v in self._negative_until.items() if v > now},
+                key=lambda kv: kv[1],
             )

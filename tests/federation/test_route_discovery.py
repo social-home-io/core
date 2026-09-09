@@ -41,7 +41,10 @@ from socialhome.domain.federation import (
     FederationEventType,
     PairingStatus,
 )
+from socialhome.federation import routed_crypto
 from socialhome.federation.route_discovery import (
+    ROUTE_CACHE_SAFETY_MARGIN_S,
+    ROUTE_CACHE_TTL_S,
     RouteDiscoveryService,
     _CachedRoute,
     _PendingDiscovery,
@@ -1248,3 +1251,203 @@ async def test_route_found_malformed_hex_identity_is_dropped():
         origin, target_instance_id=target_id, payload=payload
     )
     assert result is None
+
+
+# ── #648: the origin must never seal under a key the target has dropped ──
+
+
+def test_route_cache_ttl_is_strictly_inside_target_eph_ttl():
+    """The origin's cache window MUST close before the target's key does.
+
+    The origin seals every routed payload under the ``target_eph_pk`` its
+    route cache holds, but the matching private half lives in the
+    *target's* memory on its own timer. If the origin's window can outlive
+    the target's, the origin keeps sealing under a dead key and the target
+    discards every envelope in silence — that is #648.
+
+    Asserted as the invariant rather than against the literals so the
+    two constants can be retuned together without the test going stale,
+    but cannot drift apart.
+    """
+    assert ROUTE_CACHE_TTL_S < routed_crypto.DEFAULT_TARGET_EPH_TTL_S
+    assert (
+        routed_crypto.DEFAULT_TARGET_EPH_TTL_S - ROUTE_CACHE_TTL_S
+        == ROUTE_CACHE_SAFETY_MARGIN_S
+    )
+    # The default a service is constructed with must be the derived value,
+    # not an independently-typed 300.0 that happens to match today.
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]})
+    default_svc = RouteDiscoveryService(
+        federation_service=nodes["a"].fed,  # type: ignore[arg-type]
+        federation_repo=nodes["a"].repo,  # type: ignore[arg-type]
+    )
+    assert default_svc._cache_ttl_s == ROUTE_CACHE_TTL_S
+    assert default_svc._cache_ttl_s < default_svc._target_eph_ttl_s
+
+
+async def test_cache_expiry_anchored_on_probe_start_not_resolution():
+    """``expires_at`` is measured from when the probe was SENT.
+
+    The target minted its ephemeral strictly *after* our probe left, so
+    anchoring on resolution would hand the origin a window longer than the
+    target's by the discovery latency — the exact overhang that lets the
+    origin outlive the key.
+    """
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]}, discovery_timeout_s=0.05)
+    b_id = nodes["b"].instance_id
+    svc = nodes["a"].service
+
+    before = time.monotonic()
+    assert await svc.discover_route(b_id) is not None
+    after = time.monotonic()
+
+    cached = svc._route_cache[b_id]
+    # Recover the instant the window was anchored on.
+    anchored_at = cached.expires_at - svc._cache_ttl_s
+    # It cannot predate our entry into discovery...
+    assert anchored_at >= before
+    # ...and it must sit at the START of the probe, not at resolution:
+    # the discovery here burns a full ``discovery_timeout_s`` collection
+    # window, so resolution-anchoring would land ~that much later.
+    elapsed = after - before
+    assert elapsed > 0.02, "discovery resolved too fast to distinguish"
+    assert anchored_at - before < elapsed / 2, (
+        "expiry looks anchored on resolution, not on probe start"
+    )
+
+
+async def test_concurrent_discovery_for_same_target_single_flights():
+    """Two concurrent discoveries for one target share a single flood.
+
+    ``_send`` re-consults discovery per chunk, so a stream that starts
+    re-discovering (or a retry loop) would otherwise spray every
+    mesh-capable peer once per chunk — O(chunks x peers) signed events.
+    """
+    nodes = _build_mesh({"a": ["b", "c"], "b": ["a", "d"], "c": ["a"], "d": ["b"]})
+    d_id = nodes["d"].instance_id
+    svc = nodes["a"].service
+    probes_before = sum(
+        1
+        for s in nodes["a"].fed.sent
+        if s["event_type"] is FederationEventType.SPACE_FIND_ROUTE
+    )
+
+    first, second = await asyncio.gather(
+        svc.discover_route(d_id),
+        svc.discover_route(d_id),
+    )
+
+    assert first is not None
+    # Both callers get the same answer, and only one flood went out.
+    assert first == second
+    probes = [
+        s
+        for s in nodes["a"].fed.sent
+        if s["event_type"] is FederationEventType.SPACE_FIND_ROUTE
+    ]
+    request_ids = {s["payload"]["request_id"] for s in probes}
+    assert len(probes) - probes_before > 0
+    assert len(request_ids) == 1, "second caller started its own flood"
+
+
+async def test_negative_result_puts_target_in_cooldown():
+    """A discovery that found nothing isn't immediately re-flooded."""
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]}, discovery_timeout_s=0.01)
+    svc = nodes["a"].service
+    unknown = "z" * 52
+
+    assert await svc.discover_route(unknown) is None
+    after_first = len(
+        [
+            s
+            for s in nodes["a"].fed.sent
+            if s["event_type"] is FederationEventType.SPACE_FIND_ROUTE
+        ]
+    )
+    assert unknown in svc._negative_until
+
+    # Second attempt inside the cooldown must not put a probe on the wire.
+    assert await svc.discover_route(unknown) is None
+    after_second = len(
+        [
+            s
+            for s in nodes["a"].fed.sent
+            if s["event_type"] is FederationEventType.SPACE_FIND_ROUTE
+        ]
+    )
+    assert after_second == after_first
+
+
+async def test_invalidate_clears_the_negative_cooldown():
+    """``invalidate`` is an explicit "look again" — it must lift the cooldown.
+
+    Otherwise the forced re-discovery that ``send_with_mesh_fallback``
+    performs after a failed routed ship gets swallowed by the cooldown the
+    preceding failure installed, and the retry is a silent no-op.
+    """
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]}, discovery_timeout_s=0.01)
+    svc = nodes["a"].service
+    unknown = "z" * 52
+
+    assert await svc.discover_route(unknown) is None
+    assert unknown in svc._negative_until
+
+    await svc.invalidate(unknown)
+    assert unknown not in svc._negative_until
+
+    probes_before = len(
+        [
+            s
+            for s in nodes["a"].fed.sent
+            if s["event_type"] is FederationEventType.SPACE_FIND_ROUTE
+        ]
+    )
+    await svc.discover_route(unknown)
+    probes_after = len(
+        [
+            s
+            for s in nodes["a"].fed.sent
+            if s["event_type"] is FederationEventType.SPACE_FIND_ROUTE
+        ]
+    )
+    assert probes_after > probes_before, "cooldown still suppressed the re-probe"
+
+
+async def test_lookup_target_eph_priv_does_not_extend_on_use():
+    """Using a target ephemeral must NOT slide its expiry forward.
+
+    Tempting one-line "fix" for #648 and deliberately rejected: the
+    documented bound is mint + TTL, and refreshing on use would turn "no
+    forward secrecy beyond the discovery window" into "none while traffic
+    flows" (``docs/crypto.md``). The fix is re-discovery, which rotates
+    the key — the FS-positive direction.
+    """
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]})
+    svc = nodes["a"].service
+    pub = svc._generate_target_eph(time.monotonic())
+    _priv, expiry_at_mint = svc._target_eph_state[pub]
+
+    assert svc.lookup_target_eph_priv(pub) is not None
+    _priv2, expiry_after_use = svc._target_eph_state[pub]
+    assert expiry_after_use == expiry_at_mint
+
+
+async def test_prune_expired_bounds_the_negative_cooldown_dict():
+    """The cooldown map is pruned like every other TTL dict.
+
+    Each failed discovery adds an entry, so a caller asking us to route
+    to a stream of unknown targets would otherwise grow it without
+    bound — the same audit finding the sibling dicts already carry a cap
+    for.
+    """
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]}, discovery_timeout_s=0.01)
+    svc = nodes["a"].service
+
+    svc._negative_until = {
+        "stale-target": time.monotonic() - 1.0,
+        "live-target": time.monotonic() + 60.0,
+    }
+    svc._prune_expired(time.monotonic())
+
+    assert "stale-target" not in svc._negative_until
+    assert "live-target" in svc._negative_until

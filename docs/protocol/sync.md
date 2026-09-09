@@ -139,6 +139,74 @@ same pipeline RTC chunks go through. The receiver verifies the
 per-chunk signature, decrypts, persists. Tier 3 (`sync_mode="full"`)
 still aborts on `DIRECT_FAILED` per §25.8.18.
 
+## Mesh-only host catch-up
+
+### Authenticating a chunk from an unpaired host
+
+Every chunk carries a per-resource signature the receiver verifies against
+the **sender's** Ed25519 identity key. For a directly-paired host that key
+comes from the `remote_instances` row — but a mesh-joined member has no
+such row for the host, so the receiver found no key and dropped every
+chunk (silently, at DEBUG: *"sync chunk from unknown instance"*). That was
+the last layer of #648, and the reason the symptom looked like a content
+bug: the stub, the content key and the media bytes all arrive.
+
+The fallback key is `spaces.host_identity_pk` on the local stub
+(migration 0045), which:
+
+- arrives in the **sealed** `SPACE_PRIVATE_INVITE` payload (§25.8.21 — it
+  is not envelope plaintext);
+- is stored only when `derive_instance_id(pk)` equals the envelope's
+  authenticated sender, so a sender can only ever assert its own real key
+  (an instance id *is* the hash of its identity key — the same binding
+  v_21 uses for `target_eph_pk`);
+- is accepted only when the stub names that same household as the space's
+  host, so one household cannot sign another's space content;
+- authorises exactly one thing: signatures on content for that space. It
+  grants no pairing and is not consulted by the §24.11 inbound pipeline.
+
+An older host that ships no key leaves the column `NULL` and the previous
+behaviour stands (fine for a paired host, no sync for a mesh one).
+
+
+A household that joined a space over the **mesh** — no direct pair with
+the host — is invisible to both of `SpaceSyncScheduler`'s usual
+triggers, because `PairingConfirmed` and the periodic sweep each walk
+CONFIRMED peers. Historically that meant such a member's only catch-up
+was the single `begin_mesh_catchup_sync` fired from
+`accept_remote_invite`; if that stream failed, nothing ever retried and
+the space stayed permanently empty (#648).
+
+Two additions close it:
+
+- **Trigger** — a startup sweep (~45 s after boot, once the
+  capabilities exchange has settled) plus every periodic tick walk the
+  local spaces whose `owner_instance_id` is neither us nor a confirmed
+  peer, and call `begin_mesh_catchup_sync` for each. That path — unlike
+  `enqueue_sync_for_space` — registers the requester-side receive
+  session the routed `SPACE_SYNC_CHUNK` replies need. Attempts are
+  capped (`MAX_MESH_CATCHUP_ATTEMPTS`) so an unreachable host can't burn
+  the host-side 5/h `(requester, space)` BEGIN budget.
+- **Watermark** — "already caught up" is the protocol's own
+  end-of-stream signal, never a content check: the provider emits the
+  `__complete__` sentinel unconditionally (even for a space with zero
+  rows), the receiver publishes `SpaceSyncComplete`, and the scheduler
+  records `(space_id, host)`. A legitimately empty space therefore
+  completes on the first attempt and is never re-BEGUN — a
+  "has no posts" heuristic would loop on it forever.
+
+Since a requester restart loses its in-memory `sync_id` as well as its
+ephemeral privates, re-issuing BEGIN with a **fresh** `sync_id` is the
+only way to recover it; a chunk arriving for the old session is dropped
+as an unknown `sync_id`. The host side of the same fix is in
+[`spaces.md` → "Cache lifetimes are ordered, not
+equal"](spaces.md#cache-lifetimes-are-ordered-not-equal).
+
+A host whose chunks keep failing gives up after
+`MAX_CONSECUTIVE_CHUNK_FAILURES` rather than pushing a whole space's
+metadata into a path that is not working — each mesh attempt costs a BFS
+plus a 3-hop signed round. The requester's next BEGIN is the recovery.
+
 ## Round-robin signaling-node selection (cluster GFS)
 
 When a Social Home instance is connected to a multi-node GFS cluster,

@@ -2672,6 +2672,19 @@ class SpaceService(SpaceMemberGuardMixin):
                 "inviter_display_name": (actor.display_name or actor.username),
                 "space_display_hint": space.name,
                 "expires_at": expires,
+                # #648 — our household's Ed25519 identity pubkey. A member
+                # that joins over the mesh is not a paired peer of ours, so
+                # it has no ``remote_instances`` row and no way to verify the
+                # per-chunk signatures on the §25.6 catch-up stream we're
+                # about to send it; every chunk was dropped at "sync chunk
+                # from unknown instance". Rides in the *sealed* payload like
+                # everything else here (§25.8.21), and the receiver stores it
+                # only if ``derive_instance_id(pk)`` matches our
+                # authenticated instance id — so it cannot assert an
+                # identity its own id doesn't already commit to. Absent on
+                # an older sender: the receiver just keeps the previous
+                # behaviour (works for a directly-paired host).
+                "host_identity_pk": self._federation.own_identity_pk.hex(),
                 # §D1b — the receiver needs enough metadata to seat a
                 # local *stub* of this space (so it shows up in their
                 # /spaces list after accept), without us shipping any

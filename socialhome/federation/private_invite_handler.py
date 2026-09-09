@@ -29,6 +29,7 @@ from ..domain.events import (
     RemoteSpaceInviteReceived,
     RemoteSpaceMemberRemoved,
 )
+from ..crypto import derive_instance_id
 from ..domain.federation import FederationEventType
 from ..domain.space import RemoteAdminOutcome
 from ..infrastructure.event_bus import EventBus
@@ -190,6 +191,70 @@ class PrivateSpaceInviteHandler:
 
     # ── Receive ─────────────────────────────────────────────────────────
 
+    async def _record_host_identity_pk(
+        self,
+        *,
+        space_id: str,
+        host_instance_id: str,
+        claimed_pk_hex: object,
+    ) -> None:
+        """Store the host household's identity pubkey on the space stub.
+
+        Why this exists (#648): a member that joined over the mesh is not a
+        paired peer of the host, so it has no ``remote_instances`` row — and
+        the §25.6 sync receiver verifies each chunk's signature against
+        exactly that row. Without a key the receiver dropped every
+        mesh-routed ``SPACE_SYNC_CHUNK`` at "sync chunk from unknown
+        instance" (at DEBUG, hence silently), leaving the joiner with the
+        stub, the content key and the media bytes but no post metadata.
+
+        The claim is only as trustworthy as the check applied to it, so it
+        is stored **only** when ``derive_instance_id(pk)`` equals the
+        envelope's authenticated sender — the same binding v_21 uses to
+        authenticate ``target_eph_pk`` in ``SPACE_ROUTE_FOUND``. An
+        instance id IS the hash of its identity key, so a sender cannot
+        assert any key other than its own real one. Anything malformed or
+        mismatched is dropped with a warning and the stub keeps a NULL
+        column (unchanged behaviour: fine for a directly-paired host).
+        """
+        if not claimed_pk_hex:
+            # Older sender — no key shipped. Directly-paired hosts are
+            # unaffected; a mesh host will still fail to sync until the
+            # host upgrades, which is the pre-existing behaviour.
+            return
+        if not isinstance(claimed_pk_hex, str):
+            log.warning(
+                "§D1b: ignoring non-string host_identity_pk from %s",
+                host_instance_id,
+            )
+            return
+        try:
+            pk = bytes.fromhex(claimed_pk_hex)
+        except ValueError:
+            log.warning(
+                "§D1b: ignoring malformed host_identity_pk hex from %s",
+                host_instance_id,
+            )
+            return
+        if len(pk) != 32:
+            log.warning(
+                "§D1b: ignoring host_identity_pk of %d bytes from %s (want 32)",
+                len(pk),
+                host_instance_id,
+            )
+            return
+        if derive_instance_id(pk) != host_instance_id:
+            # Either a bug or an attempt to bind someone else's identity to
+            # this space. Loud: a legitimate sender can never hit this.
+            log.warning(
+                "§D1b: host_identity_pk from %s does not derive to its "
+                "instance id — refusing to store it for space %s",
+                host_instance_id,
+                space_id,
+            )
+            return
+        await self._space_repo.set_host_identity_pk(space_id, claimed_pk_hex)
+
     async def _on_invite(self, event: "FederationEvent") -> None:
         """A peer invited one of our users to their private space."""
         p = event.payload
@@ -246,6 +311,11 @@ class PrivateSpaceInviteHandler:
                 meta=meta,
             )
             await self._space_repo.save(stub)
+            await self._record_host_identity_pk(
+                space_id=space_id,
+                host_instance_id=event.from_instance,
+                claimed_pk_hex=p.get("host_identity_pk"),
+            )
             # §D1b cover bytes (#116) — when shipped inline, persist
             # so the stub renders the real cover rather than the
             # gradient placeholder.
