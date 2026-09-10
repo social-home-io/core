@@ -360,3 +360,73 @@ describe('PairingFlow — GFS pending-approval success dialog', () => {
     expect(routeSpy).toHaveBeenCalledWith('/momentum/public/sharing')
   })
 })
+
+describe('PairingFlow — "external URL not configured" hint per platform', () => {
+  /**
+   * The inviter's POST /api/pairing/initiate returns 422 when this Social
+   * Home has no externally-reachable inbox URL. What the admin should DO
+   * about that differs per deployment, and the haos case is the reason
+   * this exists: the add-on sits behind HA Ingress with no address of its
+   * own and no settings field to type one into, so the old copy sent
+   * those users looking for a control that isn't there.
+   *
+   * Drives the real `instanceConfig` signal rather than mocking
+   * `@/platform`, so the accessors themselves are covered.
+   */
+  async function hintAfter422(mode: 'standalone' | 'ha' | 'haos' | null) {
+    const { instanceConfig } = await import('@/store/instance')
+    instanceConfig.value = mode === null
+      ? null
+      : {
+          mode,
+          instance_name: 'Test Home',
+          instance_id: 'iid',
+          capabilities: [],
+          setup_required: false,
+        }
+    const { ApiError } = await import('@/api')
+    apiPost.mockRejectedValueOnce(new ApiError(422, 'API 422: /api/pairing/initiate'))
+
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    render(<PairingFlow />)
+    openPairing('household')
+    await screen.findByText('pairing.role_show')
+    fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
+    await screen.findByText('pairing.failed')
+    return document.body.textContent ?? ''
+  }
+
+  it('haos: points at the HA custom integration, never at settings', async () => {
+    const text = await hintAfter422('haos')
+    expect(text).toContain('Social Home integration in Home Assistant')
+    // The add-on has no external-URL field, so mentioning settings here
+    // would send the admin hunting for a control that does not exist.
+    expect(text).not.toContain('Settings → Connections')
+    // The add-on ships the integration (Supervisor discovery), so there
+    // is no HACS step for the user to take.
+    expect(text).not.toContain('HACS')
+  })
+
+  it('ha: offers the settings field AND the integration', async () => {
+    const text = await hintAfter422('ha')
+    expect(text).toContain('Settings → Connections')
+    expect(text).toContain('Social Home integration in Home Assistant')
+    expect(text).not.toContain('HACS')
+  })
+
+  it('standalone: unchanged — settings only, no HA wording', async () => {
+    const text = await hintAfter422('standalone')
+    expect(text).toContain('Settings → Connections')
+    expect(text).not.toContain('Home Assistant')
+    expect(text).not.toContain('HACS')
+  })
+
+  it('falls back to the standalone wording before the config loads', async () => {
+    // `instanceConfig` is null until GET /api/instance/config resolves. The
+    // hint must still be the text this always showed, not an HA-specific
+    // one guessed at from nothing.
+    const text = await hintAfter422(null)
+    expect(text).toContain('Settings → Connections')
+    expect(text).not.toContain('Home Assistant')
+  })
+})
