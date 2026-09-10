@@ -1,7 +1,7 @@
 """Pull HA's ``web_rtc/ice_servers`` over the HA Core WebSocket and
 push the result to :class:`FederationService.set_ice_servers`.
 
-Replaces the prior arrangement where the HA HACS integration POSTed
+Replaces the prior arrangement where the HA integration POSTed
 the list to ``PUT /api/ha/integration/ice-servers`` on
 ``EVENT_CORE_CONFIG_UPDATE``:
 
@@ -11,13 +11,13 @@ the list to ``PUT /api/ha/integration/ice-servers`` on
 * the diagnostic was opaque (push failed → integration logs WARN,
   SH side has no record);
 * it required keeping a write endpoint on SH and an extra
-  push pipeline in the HACS package — two surfaces for one fact.
+  push pipeline in the integration — two surfaces for one fact.
 
 The pull side is simpler: SH owns the cadence (one fetch at boot,
 one daily refresh) and the diagnostic (every fetch logs INFO with
 the resolved server count, failures log WARN with the WS error).
 The HA integration's ``ice_servers.py`` is deleted in the matching
-HACS-package PR.
+integration-side PR.
 
 The fetch uses the same :class:`socialhome.platform.ha.client.HaClient`
 the adapter already owns for ``config/auth/list`` etc. — that

@@ -580,11 +580,18 @@ UI-authenticated user cannot impersonate the integration.
 
 ## HFS — HA integration bridge
 
-Pushed to by the separate `ha-integration` HACS package. The integration
-resolves the externally-reachable URL inside HA (`external_url` or
-Nabu Casa Remote UI) and mirrors it here so the addon can stamp it into
-new pairing QRs + fan out `URL_UPDATED` to already-paired peers. Admin
-Bearer auth (the integration holds the auto-provisioned token).
+Pushed to by the companion `socialhome` Home Assistant integration. The
+integration resolves the externally-reachable URL inside HA
+(`external_url` or Nabu Casa Remote UI) and mirrors it here so the addon
+can stamp it into new pairing QRs + fan out `URL_UPDATED` to
+already-paired peers. Admin Bearer auth (the integration holds the
+auto-provisioned token written to `<data_dir>/integration_token.txt`).
+
+There is **no separate download step** under the add-on: `HaBootstrap`
+pushes a Supervisor discovery entry on every boot
+(`platform/haos/bootstrap.py`, `platform/haos/supervisor.py` →
+`POST /discovery`) advertising the add-on's host, port and integration
+token, so Home Assistant surfaces the integration for setup on its own.
 
 | Method | Path | Purpose |
 |---|---|---|

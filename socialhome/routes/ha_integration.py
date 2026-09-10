@@ -1,10 +1,15 @@
 """HA integration bridge routes (§7, §11).
 
-Endpoints the separate `ha-integration` HACS package calls into — the
-integration runs inside Home Assistant, knows the externally-reachable
+Endpoints the companion ``socialhome`` Home Assistant integration calls
+into — it runs inside Home Assistant, knows the externally-reachable
 URL (admin-set `external_url` or Nabu Casa Remote UI), and pushes it
 here so the addon can stamp it into new pairing QRs and notify already-
 paired peers via ``URL_UPDATED``.
+
+The integration is not a separate HACS download: under the add-on,
+:class:`~socialhome.platform.haos.bootstrap.HaBootstrap` pushes a
+Supervisor discovery entry on every boot so Home Assistant offers it
+for setup directly.
 
 Auth: uses the normal bearer-token path. The integration holds the
 token written to ``<data_dir>/integration_token.txt`` by
