@@ -4391,21 +4391,35 @@ def cmd_space_sync_catchup_media() -> None:
         )
     print("  d.gallery_albums has the host's system album ✓ (catch-up)")
 
-    # NOT asserted: the user-created album ``album_id`` and its items.
-    # They genuinely do NOT arrive, and the cause is a schema bug that is
-    # independent of the mesh — see issue #650. ``gallery_albums.owner_user_id``
-    # and ``gallery_items.uploaded_by`` both carry
-    # ``REFERENCES users(user_id)``, which a REMOTE owner can never satisfy,
-    # so the receiver's ``create_album`` raises and ``_persist_album``
-    # swallows it. Federated content elsewhere avoids this by design
-    # (``space_posts.author`` is a bare ``TEXT NOT NULL``, no FK, precisely
-    # because the author may live on another household). Fixing it means
-    # rebuilding two tables to drop the FKs, so it gets its own PR + its own
-    # migration audit rather than riding along here. The system album above
-    # only lands because its ``owner_user_id`` is NULL.
-    # When #650 lands, re-add:
-    #     assert album_id in d_albums
-    #     assert the album's item row exists on d
+    # The USER-created album and its item must arrive too (#650). These
+    # used to be impossible: ``gallery_albums.owner_user_id`` and
+    # ``gallery_items.uploaded_by`` carried ``REFERENCES users(user_id)``,
+    # which a REMOTE owner can never satisfy, so the insert raised and the
+    # receiver swallowed it — the joiner got image bytes and no rows.
+    # Migration 0046 drops those FKs, matching ``space_posts.author`` (a
+    # bare TEXT, no FK, precisely because the author may be remote).
+    if album_id not in d_albums:
+        raise SystemExit(
+            f"space-sync-catchup-media: d has no gallery album row for the "
+            f"pre-invite album {album_id} (saw {sorted(d_albums)})",
+        )
+    print(f"  d.gallery_albums has pre-invite album {album_id} ✓ (catch-up)")
+
+    d_items = {
+        r[0]
+        for r in _rows(
+            "d",
+            "SELECT id FROM gallery_items WHERE album_id = ?",
+            (album_id,),
+        )
+    }
+    if not d_items:
+        raise SystemExit(
+            f"space-sync-catchup-media: d has no gallery_items rows in the "
+            f"pre-invite album {album_id} — the album synced but its "
+            f"contents did not",
+        )
+    print(f"  d.gallery_items has {len(d_items)} row(s) in {album_id} ✓")
 
     # The REST surface must agree with the DB — that's what a user sees.
     s, feed = _request(

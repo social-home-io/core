@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from unittest.mock import AsyncMock
 from types import SimpleNamespace
 
 
@@ -577,3 +579,50 @@ async def test_on_chunk_rejects_mesh_chunk_signed_by_the_wrong_key(
     await r.on_chunk(serialise_chunk(envelope), from_instance=host)
 
     assert space_repo.members == []
+
+
+# ── #650: gallery persist failures must be visible ────────────────────
+
+
+async def test_persist_album_failure_is_logged_not_swallowed(receiver, caplog):
+    """A failing album insert must surface, not vanish.
+
+    ``create_album`` is already ``ON CONFLICT DO NOTHING``, so a
+    redelivered album never reaches the exception path — which means the
+    old blanket ``except Exception: pass`` (commented "already exists")
+    could only ever hide real failures. It hid #650 for as long as gallery
+    sync has existed: a remotely-owned album violated
+    ``owner_user_id REFERENCES users``, so members got image bytes and no
+    rows.
+    """
+    r, space_repo, _ = receiver
+    r._gallery_repo.create_album = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        await r._persist_album(
+            {"id": "al-1", "space_id": "sp-1", "name": "Holiday", "is_system": 0},
+        )
+
+    assert "gallery album al-1" in caplog.text
+
+
+async def test_persist_gallery_item_failure_is_logged_not_swallowed(receiver, caplog):
+    """Same for items — a missing parent album must not be silent."""
+    r, _space_repo, _ = receiver
+    r._gallery_repo.create_item = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        await r._persist_gallery_item(
+            {
+                "id": "it-1",
+                "album_id": "al-missing",
+                "uploaded_by": "u-remote",
+                "item_type": "photo",
+                "url": "/api/media/a.webp",
+                "thumbnail_url": "/api/media/t.webp",
+                "width": 10,
+                "height": 10,
+            },
+        )
+
+    assert "gallery item it-1" in caplog.text

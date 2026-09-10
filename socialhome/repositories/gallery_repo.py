@@ -301,6 +301,12 @@ class SqliteGalleryRepo:
                 duration_s, caption, taken_at, sort_order,
                 source_post_id, created_at
             ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            -- Idempotent, matching ``create_album``: a §25.6 sync can
+            -- legitimately re-deliver the same item (a resumed stream, a
+            -- re-issued BEGIN after a restart), and that is not an error.
+            -- Without this, a redelivery raised and the receiver's blanket
+            -- ``except`` hid it along with the failures that mattered.
+            ON CONFLICT DO NOTHING
             """,
             (
                 item.id,

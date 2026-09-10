@@ -91,7 +91,12 @@ Implemented by `socialhome/federation/sync/space/resume.py`
   `gallery_items.album_id` → `gallery_albums.space_id`. Albums
   themselves still ride the chunked initial sync (§4.2.3); only items
   push per-event. Wire payload is the §S-9 thumbnail-only projection
-  — full files are fetched on demand.
+  — full files are fetched on demand. Both rows record the owning /
+  uploading `user_id` with **no** foreign key, because that user lives
+  on the originating household — the same reason `space_posts.author`
+  carries none. Before migration 0046 those columns referenced the local
+  `users` table, so a synced album or item could not be inserted at all
+  and a member household received the image bytes and no rows (#650).
 
 Each resource is capped at `MAX_PER_RESOURCE = 500` events per request
 — receivers paginate by re-issuing with the new high-water mark.
