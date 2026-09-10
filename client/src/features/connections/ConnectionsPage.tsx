@@ -39,6 +39,7 @@ import {
 import { useTitle } from '@/store/pageTitle'
 import type { GfsConnection } from '@/types'
 import { t } from '@/i18n/i18n'
+import { isSupervisorAddon } from '@/platform'
 import { confirmDialog } from '@/components/confirm'
 import { relativeDocsTime } from '@/utils/relativeTime'
 
@@ -286,6 +287,134 @@ async function unpair(instanceId: string) {
   }
 }
 
+
+//: Module-level like ``autoPairRequests`` above, so the loader can be a
+//: plain function rather than a component-scoped closure the effect would
+//: have to list as a dependency.
+const extUrlStored = signal<string | null>(null)
+const extUrlEffective = signal<string | null>(null)
+const extUrlSource = signal<string | null>(null)
+const extUrlDraft = signal('')
+const extUrlBusy = signal(false)
+const extUrlLoaded = signal(false)
+
+async function loadExternalUrl() {
+  try {
+    const r = await api.get('/api/admin/federation/external-url') as {
+      base: string | null; effective: string | null; source: string | null
+    }
+    extUrlStored.value = r.base
+    extUrlEffective.value = r.effective
+    extUrlSource.value = r.source
+    extUrlDraft.value = r.base ?? ''
+  } catch {
+    // Non-fatal — the rest of the page is still useful without it.
+  } finally {
+    extUrlLoaded.value = true
+  }
+}
+
+/**
+ * ExternalUrlSection — the federation inbox base URL peers POST to.
+ *
+ * Admin-only, and hidden under the Supervisor add-on (haos): there the
+ * companion Home Assistant integration owns this value, and a
+ * hand-typed URL would point at an inbox path only that integration
+ * registers inside Home Assistant — so offering the field would invite
+ * an unreachable address rather than fix one.
+ *
+ * `effective` is shown alongside the stored value because the two differ when
+ * an automatic source is also present (`socialhome.toml` under
+ * standalone, the integration under ha). Without it, an admin cannot
+ * tell "I typed something" apart from "it is in effect".
+ */
+function ExternalUrlSection() {
+  useEffect(() => { void loadExternalUrl() }, [])
+
+  const save = async () => {
+    extUrlBusy.value = true
+    try {
+      const body = extUrlDraft.value.trim() ? { base: extUrlDraft.value.trim() } : { base: null }
+      const r = await api.put('/api/admin/federation/external-url', body) as {
+        base: string | null; changed: boolean; peers_notified: number
+      }
+      extUrlStored.value = r.base
+      await loadExternalUrl()
+      showToast(
+        r.base === null
+          ? 'External URL cleared.'
+          : r.peers_notified > 0
+            ? `External URL saved — ${r.peers_notified} paired household(s) notified.`
+            : 'External URL saved.',
+        'success',
+      )
+    } catch (err) {
+      showToast(
+        err instanceof Error && /422/.test(err.message)
+          ? 'That needs to be a full http(s) URL, e.g. https://home.example.com'
+          : 'Could not save the external URL.',
+        'error',
+      )
+    } finally {
+      extUrlBusy.value = false
+    }
+  }
+
+  if (!extUrlLoaded.value) return null
+
+  const dirty = extUrlDraft.value.trim() !== (extUrlStored.value ?? '')
+
+  return (
+    <section class="sh-connections-section sh-external-url-section">
+      <div class="sh-section-header">
+        <div class="sh-section-header__title">
+          <h2>External URL</h2>
+        </div>
+      </div>
+      <p class="sh-muted" style={{ marginTop: 0, fontSize: 'var(--sh-font-size-sm)' }}>
+        The address other households reach this Social Home at. Pairing
+        needs it — without one, generating a pairing code fails.
+      </p>
+      <div class="sh-external-url-row">
+        <label class="sh-external-url-label" for="sh-external-url">
+          Base URL
+        </label>
+        <input
+          id="sh-external-url"
+          class="sh-input"
+          type="url"
+          inputMode="url"
+          autocomplete="off"
+          placeholder="https://home.example.com"
+          value={extUrlDraft.value}
+          disabled={extUrlBusy.value}
+          onInput={(e) => { extUrlDraft.value = (e.target as HTMLInputElement).value }}
+        />
+        <Button onClick={() => void save()} disabled={extUrlBusy.value || !dirty}>
+          {extUrlBusy.value ? 'Saving…' : 'Save'}
+        </Button>
+      </div>
+      {extUrlEffective.value ? (
+        <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
+          Peers currently POST to <code>{extUrlEffective.value}</code>
+          {extUrlSource.value === 'auto' && ' (from this deployment’s configuration)'}
+          .
+        </p>
+      ) : (
+        <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
+          Not configured yet — pairing will fail until this is set.
+        </p>
+      )}
+      {extUrlStored.value && (
+        <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
+          Clear the field and save to go back to this deployment’s own
+          configuration.
+        </p>
+      )}
+    </section>
+  )
+}
+
 export default function ConnectionsPage() {
   useTitle(t('connections.title'))
   const [autoPairBusy, setAutoPairBusy] = useState(false)
@@ -403,6 +532,9 @@ export default function ConnectionsPage() {
           ))}
         </section>
       )}
+
+      {/* ── External URL (admin-only; the integration owns it on haos) ── */}
+      {isAdmin && !isSupervisorAddon() && <ExternalUrlSection />}
 
       {/* ── Households ─────────────────────────────────────────────── */}
       <section class="sh-connections-section">

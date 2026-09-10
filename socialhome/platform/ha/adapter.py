@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from ... import app_keys as K
 from ...services.ha_bridge_service import HaBridgeService
+from ..federation_base import manual_federation_base
 from ..adapter import (
     Capability,
     ExternalUser,
@@ -240,9 +241,20 @@ class HaAdapter(PlatformAdapter):
         Idempotent against an integration that ever pushes the full
         path (or a future-renamed prefix) so we don't double-append.
 
-        Returns ``None`` until the integration has pushed something;
-        the pairing route surfaces it as 422 ``NOT_CONFIGURED``.
+        An admin-set value (``/api/admin/federation/external-url``) wins
+        when present. That one means something different — the base at
+        which *this* Social Home is directly reachable, so it carries
+        Social Home's own inbox path rather than the HA-hosted forwarder
+        — which is exactly why the two are stored under separate keys.
+        It is the escape hatch for a deployment running without the
+        integration.
+
+        Returns ``None`` until either is set; the pairing route surfaces
+        it as 422 ``NOT_CONFIGURED``.
         """
+        manual = await manual_federation_base(self._db)
+        if manual is not None:
+            return manual
         if self._db is None:
             return None
         row = await self._db.fetchone(
