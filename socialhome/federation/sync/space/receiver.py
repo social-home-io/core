@@ -539,9 +539,21 @@ class SpaceSyncReceiver:
         )
         try:
             await self._gallery_repo.create_album(album)
-        except Exception:  # pragma: no cover
-            # already exists → INSERT OR IGNORE-equivalent.
-            pass
+        except Exception:
+            # NOT a duplicate: ``create_album`` is already
+            # ``ON CONFLICT DO NOTHING``, so a redelivered album is silent
+            # at the SQL layer and never reaches here. The previous comment
+            # claimed otherwise and the blanket ``pass`` hid the real
+            # failure for as long as gallery sync has existed — a remotely
+            # owned album violated ``owner_user_id REFERENCES users``, so a
+            # member household got the image bytes and no rows (#650).
+            # Anything landing here is worth seeing.
+            log.warning(
+                "sync: persisting gallery album %s (space=%s) failed",
+                album.id,
+                album.space_id,
+                exc_info=True,
+            )
 
     async def _persist_gallery_item(self, record: dict[str, Any]) -> None:
         from ....domain.gallery import GalleryItem
@@ -563,8 +575,16 @@ class SpaceSyncReceiver:
         )
         try:
             await self._gallery_repo.create_item(item)
-        except Exception:  # pragma: no cover
-            pass
+        except Exception:
+            # Same reasoning as ``_persist_album``: redelivery is handled in
+            # SQL, so a failure here is real (a missing parent album, a bad
+            # record) and must not be silent.
+            log.warning(
+                "sync: persisting gallery item %s (album=%s) failed",
+                item.id,
+                item.album_id,
+                exc_info=True,
+            )
 
 
 # ─── Record → domain helpers ────────────────────────────────────────
