@@ -34,6 +34,7 @@ import { Button } from './Button'
 import { Spinner } from './Spinner'
 import { showToast } from './Toast'
 import { t } from '@/i18n/i18n'
+import { isHomeAssistant, isSupervisorAddon } from '@/platform'
 import { ShareHomeToggle } from './ShareHomeToggle'
 import { QrCodeImg } from './QrCodeImg'
 import { QrScanner } from './QrScanner'
@@ -77,6 +78,56 @@ const justPairedInstanceId = signal<string | null>(null)
 const justPairedDisplayName = signal<string | null>(null)
 
 /**
+ * The inviter side can't mint a pairing token until this Social Home
+ * knows an externally-reachable inbox URL (a 422 from
+ * ``/api/pairing/initiate``). *How* an admin supplies that URL depends
+ * entirely on the deployment, so the hint has to as well — telling a
+ * Supervisor add-on user to edit a settings field it doesn't have just
+ * strands them.
+ *
+ * - **haos** — the add-on lives behind HA Ingress and has no address of
+ *   its own to advertise. The Social Home HA integration is the only
+ *   supported source: it runs inside Home Assistant, resolves the
+ *   reachable URL (`external_url`, or Nabu Casa Remote UI) and pushes it
+ *   to the add-on, which then stamps it into new pairing QRs. The add-on
+ *   ships it — `HaBootstrap` registers with the Supervisor's discovery
+ *   integration (`platform/haos/supervisor.py`) so Home Assistant offers
+ *   it directly; there is no HACS step to mention, and no settings field
+ *   to point at either.
+ * - **ha** — the URL can be configured directly, and the integration
+ *   will also supply it, so offer both.
+ * - **standalone** — unchanged.
+ *
+ * Read through the `@/platform` accessors rather than comparing mode
+ * strings, mirroring the backend's "consume capabilities, never branch on
+ * `config.mode`" rule. Both accessors are false until
+ * `GET /api/instance/config` has loaded, which falls through to the
+ * standalone wording — the same text this showed before, so a slow config
+ * fetch can't make the hint wrong, only less specific.
+ */
+function notConfiguredHint(): string {
+  if (isSupervisorAddon()) {
+    return (
+      'Install the Social Home integration in Home Assistant before '
+      + 'pairing — it gives this add-on the reachable address the other '
+      + 'household needs.'
+    )
+  }
+  if (isHomeAssistant()) {
+    return (
+      "Set this Social Home's external URL in Settings → Connections "
+      + 'before pairing — the other household needs a reachable inbox URL. '
+      + 'Or install the Social Home integration in Home Assistant to '
+      + 'supply it automatically.'
+    )
+  }
+  return (
+    "Set this Social Home's external URL in Settings → Connections "
+    + 'before pairing — the other household needs a reachable inbox URL.'
+  )
+}
+
+/**
  * Translate an API failure into a human-friendly hint shown under the
  * "Pairing failed" headline. The previous behaviour dumped the raw
  * ``Error.message`` string ("API 422: /api/pairing/initiate") which
@@ -86,15 +137,12 @@ const justPairedDisplayName = signal<string | null>(null)
  * The ``stage`` argument lets us tailor the hint to where the failure
  * happened (only ``'initiate'`` carries a 422 today — the inviter side
  * needs an external URL configured before the server will mint a
- * pairing token).
+ * pairing token; see {@link notConfiguredHint}).
  */
 function friendlyPairError(err: unknown, stage?: 'initiate'): string {
   if (err instanceof ApiError) {
     if (stage === 'initiate' && err.status === 422) {
-      return (
-        "Set this Social Home's external URL in Settings → Connections "
-        + 'before pairing — the other household needs a reachable inbox URL.'
-      )
+      return notConfiguredHint()
     }
     if (err.status === 401 || err.status === 403) {
       return 'Only household admins can pair. Ask an admin to retry.'
