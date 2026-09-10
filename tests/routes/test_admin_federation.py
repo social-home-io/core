@@ -262,3 +262,131 @@ async def test_resync_v19_peer_space_scope_is_200(client):
     assert resp.status == 200
     body = await resp.json()
     assert body["scope"] == "space:sp-1"
+
+
+# ── GET / PUT /api/admin/federation/external-url ──────────────────────
+#
+# The admin-set federation inbox base URL. Before this endpoint the only
+# sources were socialhome.toml (operator-owned, not writable from the UI)
+# and the Home Assistant integration — while the pairing error told
+# admins to "set this Social Home's external URL in Settings", a field
+# that existed nowhere in the SPA.
+
+
+async def test_external_url_requires_admin(client):
+    db = client._db
+    await db.enqueue("UPDATE users SET is_admin=0 WHERE user_id=?", (client._uid,))
+    for call in (
+        client.get("/api/admin/federation/external-url", headers=_auth(client._tok)),
+        client.put(
+            "/api/admin/federation/external-url",
+            json={"base": "https://h.example"},
+            headers=_auth(client._tok),
+        ),
+    ):
+        resp = await call
+        assert resp.status == 403
+
+
+async def test_external_url_unset_reads_null(client):
+    resp = await client.get(
+        "/api/admin/federation/external-url", headers=_auth(client._tok)
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["base"] is None
+
+
+async def test_external_url_round_trips(client):
+    resp = await client.put(
+        "/api/admin/federation/external-url",
+        json={"base": "https://home.example.com"},
+        headers=_auth(client._tok),
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["ok"] is True
+    assert body["base"] == "https://home.example.com"
+    assert body["changed"] is True
+
+    resp = await client.get(
+        "/api/admin/federation/external-url", headers=_auth(client._tok)
+    )
+    body = await resp.json()
+    assert body["base"] == "https://home.example.com"
+    assert body["source"] == "manual"
+    # The adapter resolves it with Social Home's own inbox path appended —
+    # that is what a peer POSTs to.
+    assert body["effective"] == "https://home.example.com/federation/inbox"
+
+
+async def test_external_url_strips_trailing_slash_and_inbox_path(client):
+    """Pasting the full inbox URL is the obvious mistake; don't double it."""
+    resp = await client.put(
+        "/api/admin/federation/external-url",
+        json={"base": "https://home.example.com/federation/inbox/"},
+        headers=_auth(client._tok),
+    )
+    assert resp.status == 200
+    assert (await resp.json())["base"] == "https://home.example.com"
+
+    resp = await client.get(
+        "/api/admin/federation/external-url", headers=_auth(client._tok)
+    )
+    assert (await resp.json())["effective"] == (
+        "https://home.example.com/federation/inbox"
+    )
+
+
+async def test_external_url_rejects_non_http(client):
+    for bad in ("home.example.com", "ftp://h.example", "javascript:alert(1)", "   "):
+        resp = await client.put(
+            "/api/admin/federation/external-url",
+            json={"base": bad},
+            headers=_auth(client._tok),
+        )
+        assert resp.status in (200, 422), bad
+        if bad.strip():
+            assert resp.status == 422, bad
+
+
+async def test_external_url_clears_back_to_the_automatic_source(client):
+    """An empty value hands control back, rather than storing a blank."""
+    await client.put(
+        "/api/admin/federation/external-url",
+        json={"base": "https://home.example.com"},
+        headers=_auth(client._tok),
+    )
+    resp = await client.put(
+        "/api/admin/federation/external-url",
+        json={"base": None},
+        headers=_auth(client._tok),
+    )
+    assert resp.status == 200
+    assert (await resp.json())["base"] is None
+
+    resp = await client.get(
+        "/api/admin/federation/external-url", headers=_auth(client._tok)
+    )
+    body = await resp.json()
+    assert body["base"] is None
+    # No row left behind — a blank string would make the adapter's
+    # "is it set?" check true while resolving to nothing useful.
+    rows = await client._db.fetchall(
+        "SELECT value FROM instance_config WHERE key='federation_base_url'",
+    )
+    assert rows == []
+
+
+async def test_external_url_unchanged_value_reports_not_changed(client):
+    """Re-submitting the same value must not re-notify peers."""
+    for _ in range(2):
+        resp = await client.put(
+            "/api/admin/federation/external-url",
+            json={"base": "https://home.example.com"},
+            headers=_auth(client._tok),
+        )
+        assert resp.status == 200
+        body = await resp.json()
+    assert body["changed"] is False
+    assert body["peers_notified"] == 0

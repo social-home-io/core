@@ -96,7 +96,12 @@ const justPairedDisplayName = signal<string | null>(null)
  *   to point at either.
  * - **ha** — the URL can be configured directly, and the integration
  *   will also supply it, so offer both.
- * - **standalone** — unchanged.
+ * - **standalone** — the external-URL instruction, unchanged in
+ *   substance. "Settings → Federation" is the sidebar's own label for
+ *   the page that now carries the field
+ *   (`features/connections/ConnectionsPage`); it used to read
+ *   "Connections", which matched neither the label nor any existing
+ *   control.
  *
  * Read through the `@/platform` accessors rather than comparing mode
  * strings, mirroring the backend's "consume capabilities, never branch on
@@ -115,14 +120,14 @@ function notConfiguredHint(): string {
   }
   if (isHomeAssistant()) {
     return (
-      "Set this Social Home's external URL in Settings → Connections "
+      "Set this Social Home's external URL in Settings → Federation "
       + 'before pairing — the other household needs a reachable inbox URL. '
       + 'Or install the Social Home integration in Home Assistant to '
       + 'supply it automatically.'
     )
   }
   return (
-    "Set this Social Home's external URL in Settings → Connections "
+    "Set this Social Home's external URL in Settings → Federation "
     + 'before pairing — the other household needs a reachable inbox URL.'
   )
 }

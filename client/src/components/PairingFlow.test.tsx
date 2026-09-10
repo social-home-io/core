@@ -401,7 +401,7 @@ describe('PairingFlow — "external URL not configured" hint per platform', () =
     expect(text).toContain('Social Home integration in Home Assistant')
     // The add-on has no external-URL field, so mentioning settings here
     // would send the admin hunting for a control that does not exist.
-    expect(text).not.toContain('Settings → Connections')
+    expect(text).not.toContain('Settings → Federation')
     // The add-on ships the integration (Supervisor discovery), so there
     // is no HACS step for the user to take.
     expect(text).not.toContain('HACS')
@@ -409,14 +409,14 @@ describe('PairingFlow — "external URL not configured" hint per platform', () =
 
   it('ha: offers the settings field AND the integration', async () => {
     const text = await hintAfter422('ha')
-    expect(text).toContain('Settings → Connections')
+    expect(text).toContain('Settings → Federation')
     expect(text).toContain('Social Home integration in Home Assistant')
     expect(text).not.toContain('HACS')
   })
 
   it('standalone: unchanged — settings only, no HA wording', async () => {
     const text = await hintAfter422('standalone')
-    expect(text).toContain('Settings → Connections')
+    expect(text).toContain('Settings → Federation')
     expect(text).not.toContain('Home Assistant')
     expect(text).not.toContain('HACS')
   })
@@ -426,7 +426,7 @@ describe('PairingFlow — "external URL not configured" hint per platform', () =
     // hint must still be the text this always showed, not an HA-specific
     // one guessed at from nothing.
     const text = await hintAfter422(null)
-    expect(text).toContain('Settings → Connections')
+    expect(text).toContain('Settings → Federation')
     expect(text).not.toContain('Home Assistant')
   })
 })

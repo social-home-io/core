@@ -488,6 +488,8 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 | GET | `/api/friends` | Connected-people dashboard payload (non-admin). Returns `{instance, households[], totals}` — the local household block + every confirmed remote household with its member list (joining `remote_instances` × `remote_users`) plus household coordinates. Whitelisted fields only — `routing_secret` / `key_self_to_remote` / `remote_inbox_url` / identity public keys never appear. |
 | GET | `/api/admin/federation/compat` | Admin-only. Federation-compatibility panel. Returns `{"ours": <int>, "peers": [...]}` where `ours` is this build's advertised `proto_version` and each peer carries `instance_id`, `display_name`, `proto_version`, `status`, `last_reachable_at`, `capabilities_known` (bool — `false` ⇒ peer is paired but has never advertised capabilities, so its `proto_version` is the conservative default rather than a confirmed value), and `lacking_features` (human-readable labels of features the peer's version is below). Confirmed peers only, ordered by display name. |
 | POST | `/api/admin/federation/resync` | Admin-only. Ask a peer to re-broadcast state for a named scope (§319.6). Body `{instance_id, scope}` where `scope` is `"capabilities"`, `"space:<id>"`, or `"calendar:<id>"` (the latter two replay membership-gated content via the §4.4 resume path). Returns `{"status": "ok", "instance_id", "scope"}`. 400 `UNPROCESSABLE` on a missing `instance_id` / unrecognised scope; 409 `PEER_TOO_OLD` when the peer's advertised `proto_version` is below v_19 (it has no resync handler). |
+| GET | `/api/admin/federation/external-url` | Admin-only. The admin-set federation inbox base URL. Returns `{base, effective, source}` — `base` is the stored value (`null` when unset), `effective` is what `PlatformAdapter.get_federation_base()` actually resolves (the peer-facing URL, i.e. `base` + `/federation/inbox`), and `source` is `"manual"` / `"auto"` / `null`. The two differ whenever an automatic source is also present, so the UI can say which one is in effect rather than leave an admin guessing. |
+| PUT | `/api/admin/federation/external-url` | Admin-only. Upsert `{"base": "https://..."}`. Validates the scheme (http/https), strips a trailing slash, and strips a trailing `/federation/inbox` so pasting a full inbox URL doesn't double it. `{"base": null}` (or an empty string) deletes the row, handing control back to the deployment's automatic source. On a value change, fans out `URL_UPDATED` to every confirmed peer so their cached `remote_inbox_url` tracks the move. Returns `{ok, base, changed, peers_notified}`. 422 `UNPROCESSABLE` on a non-http(s) value. |
 | PATCH | `/api/admin/instance` | Admin-only. Rename the household — set the federated instance display name. Body `{display_name}` (1–80 chars after trimming). Persists `instance_identity.display_name` and re-broadcasts it to every confirmed peer via `INSTANCE_CAPABILITIES_UPDATED`, so paired households see the new name without re-pairing. Returns `{"display_name"}`. 422 `UNPROCESSABLE` on a missing/blank/over-length name. |
 
 ## HFS — Calls & WebRTC
@@ -592,6 +594,17 @@ pushes a Supervisor discovery entry on every boot
 (`platform/haos/bootstrap.py`, `platform/haos/supervisor.py` →
 `POST /discovery`) advertising the add-on's host, port and integration
 token, so Home Assistant surfaces the integration for setup on its own.
+
+The integration's value is stored separately from the admin-set one
+(`instance_config['ha_federation_base']` vs `['federation_base_url']`)
+because they mean different things: the integration pushes *Home
+Assistant's* URL and the adapter appends `/api/socialhome/inbox` (an
+HA-hosted view forwarding into the add-on), whereas an admin-entered value
+is the address Social Home is reachable at directly and gets Social Home's
+own `/federation/inbox`. Conflating them would yield an unreachable URL for
+one source or the other. An admin-set value wins when present, so typing
+one is never a silent no-op; clearing it returns control to the
+integration.
 
 | Method | Path | Purpose |
 |---|---|---|

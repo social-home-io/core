@@ -11923,6 +11923,34 @@ a.sh-welcome-card:hover {
 }
 
 /* ───── Incoming auto-pair inbox ────────────────────────────────── */
+/* ── External URL (admin, Federation page) ──────────────────────────────
+   Label / input / Save on one row on desktop. Below 640px it stacks: at
+   390px an input plus a button side by side leaves the field too narrow
+   to read a full https:// URL and squeezes the tap target. */
+.sh-external-url-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  margin: var(--sh-space-sm) 0;
+  flex-wrap: wrap;
+}
+.sh-external-url-label {
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.sh-external-url-row .sh-input {
+  flex: 1 1 22ch;
+  min-width: 0;   /* shrink inside the flex row instead of overflowing */
+}
+@media (max-width: 640px) {
+  .sh-external-url-row { flex-direction: column; align-items: stretch; }
+  .sh-external-url-row .sh-input { flex: 1 1 auto; }
+}
+/* The resolved inbox URL is a long unbroken token; let it break anywhere
+   rather than push the section wider than the viewport. */
+.sh-external-url-section code { overflow-wrap: anywhere; }
+
 .sh-auto-pair-inbox {
   padding: var(--sh-space-md);
   background: linear-gradient(

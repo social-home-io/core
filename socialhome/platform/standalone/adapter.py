@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 import aiohttp
 
 from ... import app_keys as K
+from ..federation_base import INBOX_PATH, manual_federation_base
 from ..adapter import (
     Capability,
     ExternalUser,
@@ -334,24 +335,34 @@ class StandaloneAdapter(PlatformAdapter):
     # ── Federation inbox base URL (§11) ───────────────────────────────────
 
     async def get_federation_base(self) -> str | None:
-        """Return ``[standalone].external_url`` + ``/federation/inbox``.
+        """Return the publicly-reachable base + ``/federation/inbox``.
 
-        ``[standalone].external_url`` is the publicly-reachable base the
-        admin has configured — "https://social.example.com". We append
-        the inbox path so the coordinator can build per-peer URLs by
-        concatenating the peer's ``local_inbox_id``.
+        Two sources, in order:
 
-        Returns ``None`` when the option is unset; the pairing route
-        converts that to a 422 ``NOT_CONFIGURED`` so the admin knows to
-        set the URL before issuing a QR.
+        1. The admin-set value from
+           ``GET / PUT /api/admin/federation/external-url``
+           (:mod:`socialhome.platform.federation_base`). Checked first so
+           typing a URL in the UI is never a silent no-op.
+        2. ``[standalone].external_url`` from ``socialhome.toml`` — the
+           operator-owned option, which the UI cannot write.
+
+        Either way we append the inbox path so the coordinator can build
+        per-peer URLs by concatenating the peer's ``local_inbox_id``.
+
+        Returns ``None`` when neither is set; the pairing route converts
+        that to a 422 ``NOT_CONFIGURED`` so the admin knows to set the URL
+        before issuing a QR.
         """
+        manual = await manual_federation_base(self._db)
+        if manual is not None:
+            return manual
         raw = self._options.get("external_url") if self._options else None
         if not raw:
             return None
         base = str(raw).rstrip("/")
         if not base:
             return None
-        return f"{base}/federation/inbox"
+        return f"{base}{INBOX_PATH}"
 
     # ── Push notifications ────────────────────────────────────────────────
     # ``send_push`` comes from the :class:`PlatformAdapter` ABC and

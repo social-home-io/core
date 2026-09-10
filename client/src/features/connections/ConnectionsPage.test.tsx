@@ -6,6 +6,7 @@ vi.mock('@/api', () => ({
   api: {
     get: vi.fn().mockResolvedValue([]),
     post: vi.fn().mockResolvedValue({}),
+    put: vi.fn().mockResolvedValue({}),
     patch: vi.fn().mockResolvedValue({}),
     delete: vi.fn().mockResolvedValue(undefined),
   },
@@ -505,7 +506,11 @@ describe('ConnectionsPage', () => {
       await waitFor(() => {
         expect(container.querySelector('.sh-connection-card')).not.toBeNull()
       })
-      const header = container.querySelector('.sh-section-header')!
+      // Scope to the households section: the admin-only External URL
+      // block also renders a `.sh-section-header`, and it sits above this
+      // one, so a bare first-match selector picks the wrong header.
+      const header = [...container.querySelectorAll('.sh-section-header')]
+        .find(h => h.textContent?.includes('connections.households'))!
       expect(header.textContent).toContain('Your protocol version: v19')
       const summary = header.querySelector('.sh-chip--update')
       expect(summary).not.toBeNull()
@@ -529,4 +534,137 @@ describe('ConnectionsPage', () => {
     })
   })
 
+})
+
+describe('ConnectionsPage — External URL (admin, non-haos)', () => {
+  /**
+   * The federation inbox base URL peers POST to. Until this landed, the
+   * pairing failure told admins to "set this Social Home's external URL
+   * in Settings → Connections" — and no such field existed anywhere in
+   * the SPA, so the instruction was unfollowable.
+   */
+  async function renderPage(opts: {
+    mode?: 'standalone' | 'ha' | 'haos'
+    admin?: boolean
+    base?: string | null
+    effective?: string | null
+    source?: string | null
+  } = {}) {
+    const { api } = await import('@/api')
+    const { instanceConfig } = await import('@/store/instance')
+    const { currentUser } = await import('@/store/auth')
+    ;(currentUser as { value: unknown }).value = {
+      user_id: 'u1', username: 'admin', display_name: 'Admin',
+      is_admin: opts.admin ?? true, picture_url: null, bio: null,
+      is_new_member: false,
+    }
+    instanceConfig.value = {
+      mode: opts.mode ?? 'standalone',
+      instance_name: 'Test', instance_id: 'iid',
+      capabilities: [], setup_required: false,
+    }
+    ;(api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url === '/api/admin/federation/external-url') {
+        return Promise.resolve({
+          base: opts.base ?? null,
+          effective: opts.effective ?? null,
+          source: opts.source ?? null,
+        })
+      }
+      return Promise.resolve([])
+    })
+    const { default: ConnectionsPage } = await import('./ConnectionsPage')
+    const r = render(<ConnectionsPage />)
+    await waitFor(() => {
+      expect(document.body.textContent).toBeTruthy()
+    })
+    return r
+  }
+
+  it('standalone admin sees the field and the resolved inbox URL', async () => {
+    const { container } = await renderPage({
+      mode: 'standalone',
+      base: 'https://home.example.com',
+      effective: 'https://home.example.com/federation/inbox',
+      source: 'manual',
+    })
+    await waitFor(() => {
+      expect(container.querySelector('.sh-external-url-section')).not.toBeNull()
+    })
+    const input = container.querySelector('#sh-external-url') as HTMLInputElement
+    expect(input).not.toBeNull()
+    expect(input.value).toBe('https://home.example.com')
+    // The admin must be able to see what peers actually POST to, which is
+    // not the same string they typed.
+    expect(container.textContent).toContain(
+      'https://home.example.com/federation/inbox',
+    )
+  })
+
+  it('warns when nothing is configured, since pairing will fail', async () => {
+    const { container } = await renderPage({ mode: 'standalone' })
+    await waitFor(() => {
+      expect(container.querySelector('.sh-external-url-section')).not.toBeNull()
+    })
+    expect(container.textContent).toContain('Not configured yet')
+  })
+
+  it('ha admin sees the field too', async () => {
+    const { container } = await renderPage({ mode: 'ha' })
+    await waitFor(() => {
+      expect(container.querySelector('.sh-external-url-section')).not.toBeNull()
+    })
+  })
+
+  it('haos hides it — the HA integration owns the value there', async () => {
+    // A hand-typed URL under the add-on would point at an inbox path only
+    // the integration registers inside Home Assistant, so offering the
+    // field would invite an unreachable address rather than fix one.
+    const { container } = await renderPage({ mode: 'haos' })
+    expect(container.querySelector('.sh-external-url-section')).toBeNull()
+  })
+
+  it('non-admins never see it', async () => {
+    const { container } = await renderPage({ mode: 'standalone', admin: false })
+    expect(container.querySelector('.sh-external-url-section')).toBeNull()
+  })
+
+  it('saves the trimmed value and clears with an empty field', async () => {
+    const { api } = await import('@/api')
+    const { container } = await renderPage({
+      mode: 'standalone',
+      base: 'https://old.example.com',
+      effective: 'https://old.example.com/federation/inbox',
+      source: 'manual',
+    })
+    await waitFor(() => {
+      expect(container.querySelector('#sh-external-url')).not.toBeNull()
+    })
+    const input = container.querySelector('#sh-external-url') as HTMLInputElement
+    const { fireEvent } = await import('@testing-library/preact')
+
+    fireEvent.input(input, { target: { value: '  https://new.example.com  ' } })
+    const save = [...container.querySelectorAll('button')]
+      .find(b => /save/i.test(b.textContent ?? ''))!
+    fireEvent.click(save)
+    await waitFor(() => {
+      expect(api.put).toHaveBeenCalledWith(
+        '/api/admin/federation/external-url',
+        { base: 'https://new.example.com' },
+      )
+    })
+
+    // Emptying the field clears it rather than storing a blank.
+    fireEvent.input(input, { target: { value: '' } })
+    fireEvent.click(
+      [...container.querySelectorAll('button')]
+        .find(b => /save/i.test(b.textContent ?? ''))!,
+    )
+    await waitFor(() => {
+      expect(api.put).toHaveBeenCalledWith(
+        '/api/admin/federation/external-url',
+        { base: null },
+      )
+    })
+  })
 })
