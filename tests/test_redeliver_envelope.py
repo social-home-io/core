@@ -260,8 +260,15 @@ async def test_redeliver_4xx_is_permanent(env):
     await fed_repo.save_instance(peer)
 
     class _Resp:
-        def __init__(self, status):
+        def __init__(self, status, body='{"error": "unknown_inbox"}'):
             self.status = status
+            self._body = body
+
+        async def text(self):
+            #: The 404 path reads the body to tell the peer's own Social
+            #: Home ("unknown_inbox") from an intermediary that answered
+            #: instead — e.g. the HA integration's forwarder view missing.
+            return self._body
 
         async def __aenter__(self):
             return self
@@ -313,8 +320,15 @@ async def test_redeliver_404_is_transient(env):
     await fed_repo.save_instance(peer)
 
     class _Resp:
-        def __init__(self, status):
+        def __init__(self, status, body='{"error": "unknown_inbox"}'):
             self.status = status
+            self._body = body
+
+        async def text(self):
+            #: The 404 path reads the body to tell the peer's own Social
+            #: Home ("unknown_inbox") from an intermediary that answered
+            #: instead — e.g. the HA integration's forwarder view missing.
+            return self._body
 
         async def __aenter__(self):
             return self
@@ -533,8 +547,15 @@ async def test_redeliver_404_becomes_permanent_after_the_pair_window(env):
     await fed_repo.save_instance(peer)
 
     class _Resp:
-        def __init__(self, status):
+        def __init__(self, status, body='{"error": "unknown_inbox"}'):
             self.status = status
+            self._body = body
+
+        async def text(self):
+            #: The 404 path reads the body to tell the peer's own Social
+            #: Home ("unknown_inbox") from an intermediary that answered
+            #: instead — e.g. the HA integration's forwarder view missing.
+            return self._body
 
         async def __aenter__(self):
             return self
@@ -594,8 +615,15 @@ async def test_redeliver_404_give_up_says_what_to_check(env, caplog):
     await fed_repo.save_instance(peer)
 
     class _Resp:
-        def __init__(self, status):
+        def __init__(self, status, body='{"error": "unknown_inbox"}'):
             self.status = status
+            self._body = body
+
+        async def text(self):
+            #: The 404 path reads the body to tell the peer's own Social
+            #: Home ("unknown_inbox") from an intermediary that answered
+            #: instead — e.g. the HA integration's forwarder view missing.
+            return self._body
 
         async def __aenter__(self):
             return self
@@ -620,3 +648,66 @@ async def test_redeliver_404_give_up_says_what_to_check(env, caplog):
     # Names both causes, because the log cannot tell them apart.
     assert "re-pair" in caplog.text
     assert "provisional" in caplog.text
+
+
+async def test_redeliver_404_without_our_marker_blames_the_intermediary(env, caplog):
+    """A 404 that did not come from the peer's Social Home reads differently.
+
+    Under ha/haos, peers are reached at
+    ``{HA URL}/api/socialhome/inbox/{inbox_id}`` — a view the companion
+    integration registers inside Home Assistant. If the integration isn't
+    loaded, Home Assistant itself 404s every inbox POST, with no Social
+    Home change on either side (an HA restart is enough). Our own inbox
+    always answers with an ``unknown_inbox`` marker, so its absence is the
+    signal, and telling an operator to re-pair would be wrong here.
+    """
+    import logging
+
+    from socialhome.infrastructure import PAIR_WINDOW_404_ATTEMPTS
+
+    svc, fed_repo, kek = env
+    peer_kp = generate_identity_keypair()
+    wrapped = kek.encrypt(b"\x07" * 32)
+    peer = RemoteInstance(
+        id=derive_instance_id(peer_kp.public_key),
+        display_name="peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
+        remote_inbox_url="https://ha.example/api/socialhome/inbox/wh",
+        local_inbox_id="wh-ha-404",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
+    )
+    await fed_repo.save_instance(peer)
+
+    class _Resp:
+        status = 404
+
+        async def text(self):
+            return "404: Not Found"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Client:
+        def post(self, url, **kw):
+            return _Resp()
+
+    svc._http_client = _Client()
+    entry = _OutboxEntry(
+        id="e-404-ha",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+        attempts=PAIR_WINDOW_404_ATTEMPTS,
+    )
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        outcome = await _redeliver_envelope(svc, fed_repo, entry)
+
+    assert outcome is DeliveryOutcome.PERMANENT
+    assert "did not come from the peer's Social Home" in caplog.text
+    # Must NOT send the operator off to re-pair — that isn't the fault.
+    assert "re-pair" not in caplog.text

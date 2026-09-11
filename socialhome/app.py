@@ -430,6 +430,25 @@ async def _redeliver_envelope(
                 # too old``, 422 ``Malformed`` etc.) stay PERMANENT —
                 # those are genuinely "the peer will never accept this".
                 if resp.status == 404:
+                    # WHO produced this 404 matters, and the status alone
+                    # can't say. Our own inbox answers a rejected inbox id
+                    # with ``{"error": "unknown_inbox"}``
+                    # (``routes/federation`` ``_GENERIC_ERROR_BY_STATUS``),
+                    # so a body carrying that marker means the peer's
+                    # Social Home saw the request and refused it. A 404
+                    # WITHOUT it came from something in front of the peer —
+                    # most often, under ha/haos, the companion integration's
+                    # ``/api/socialhome/inbox/{id}`` view not being
+                    # registered because the integration isn't loaded. That
+                    # needs fixing on the peer's Home Assistant, not by
+                    # re-pairing, and it can appear with no Social Home
+                    # change at all (an HA restart is enough).
+                    peer_rejected = False
+                    try:
+                        body_text = (await resp.text())[:200]
+                        peer_rejected = "unknown_inbox" in body_text
+                    except Exception:  # pragma: no cover — diagnostics only
+                        body_text = ""
                     # Bounded, not indefinite. The race this covers clears
                     # in seconds; beyond that the peer genuinely cannot
                     # resolve the inbox id we hold, and retrying the full
@@ -437,24 +456,43 @@ async def _redeliver_envelope(
                     # attempt to reach the same conclusion.
                     if entry.attempts < PAIR_WINDOW_404_ATTEMPTS:
                         log.info(
-                            "outbox: %s returned 404 (unknown inbox) for %s"
-                            " — attempt %d, retrying (pair-window race)",
+                            "outbox: %s returned 404 for %s (%s) — attempt"
+                            " %d, retrying (pair-window race)",
+                            entry.instance_id,
+                            entry.id,
+                            "peer's Social Home rejected the inbox id"
+                            if peer_rejected
+                            else "not from the peer's Social Home",
+                            entry.attempts + 1,
+                        )
+                        return DeliveryOutcome.TRANSIENT
+                    if peer_rejected:
+                        log.warning(
+                            "outbox: %s still returns 404 for %s after %d"
+                            " attempts — dropping. The peer's Social Home"
+                            " cannot resolve the inbox id we hold for it:"
+                            " either it has no pairing row for us (re-pair to"
+                            " fix), or its row is still provisional because"
+                            " an auto-pair ack never landed.",
                             entry.instance_id,
                             entry.id,
                             entry.attempts + 1,
                         )
-                        return DeliveryOutcome.TRANSIENT
-                    log.warning(
-                        "outbox: %s still returns 404 for %s after %d"
-                        " attempts — dropping. The peer cannot resolve the"
-                        " inbox id we hold for it: either it has no pairing"
-                        " row for us (re-pair to fix), or its row is still"
-                        " provisional because an auto-pair ack never landed."
-                        " Check this household's entry on that peer.",
-                        entry.instance_id,
-                        entry.id,
-                        entry.attempts + 1,
-                    )
+                    else:
+                        log.warning(
+                            "outbox: %s still returns 404 for %s after %d"
+                            " attempts — dropping. The response did not come"
+                            " from the peer's Social Home (no 'unknown_inbox'"
+                            " marker), so something in front of it answered:"
+                            " under Home Assistant this is typically the"
+                            " companion integration not being loaded, so its"
+                            " /api/socialhome/inbox view isn't registered."
+                            " Body was: %r",
+                            entry.instance_id,
+                            entry.id,
+                            entry.attempts + 1,
+                            body_text,
+                        )
                     return DeliveryOutcome.PERMANENT
                 log.warning(
                     "outbox: %s returned terminal HTTP %d for %s — dropping",
