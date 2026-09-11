@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import base64
 import hashlib
 import hmac
@@ -205,3 +207,59 @@ def test_warn_if_turn_unusable_silent_when_no_turn(caplog):
     caplog.set_level(logging.WARNING, logger="socialhome.webrtc_ice")
     warn_if_turn_unusable([{"urls": ["stun:stun.l.google.com:19302"]}])
     assert not any("usable credentials" in r.message for r in caplog.records)
+
+
+# ── warn_if_turn_unusable / warn_if_no_turn ───────────────────────────
+#
+# Neither had a direct test, which is how the early-return below survived.
+
+
+def test_warn_if_turn_unusable_flags_a_credential_less_entry(caplog):
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        warn_if_turn_unusable([{"urls": ["turn:t.example:3478"]}])
+    assert "WITHOUT usable credentials" in caplog.text
+
+
+def test_warn_if_turn_unusable_quiet_when_credentials_present(caplog):
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        warn_if_turn_unusable(
+            [{"urls": ["turn:t.example:3478"], "username": "u", "credential": "c"}],
+        )
+    assert "WITHOUT usable credentials" not in caplog.text
+
+
+def test_warn_if_turn_unusable_checks_every_entry_not_just_the_first(caplog):
+    """A bad TURN entry behind a good one must still be reported.
+
+    The check used to ``return`` after the first TURN entry. That was
+    harmless while the only input was ``build_ice_servers`` (at most one
+    TURN entry), but the HA Core pull can deliver several — and that list
+    is now passed through these diagnostics on every refresh.
+    """
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        warn_if_turn_unusable(
+            [
+                {"urls": ["stun:stun.example:3478"]},
+                {
+                    "urls": ["turn:good.example:3478"],
+                    "username": "u",
+                    "credential": "c",
+                },
+                {"urls": ["turn:bad.example:3478"]},
+            ],
+        )
+    assert "bad.example" in caplog.text
+
+
+def test_warn_if_no_turn_fires_on_a_stun_only_list(caplog):
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        warn_if_no_turn([{"urls": ["stun:stun.example:3478"]}])
+    assert "no TURN server configured" in caplog.text
+
+
+def test_warn_if_no_turn_quiet_when_turn_present(caplog):
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        warn_if_no_turn(
+            [{"urls": ["turn:t.example:3478"], "username": "u", "credential": "c"}],
+        )
+    assert "no TURN server configured" not in caplog.text

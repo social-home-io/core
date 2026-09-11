@@ -133,6 +133,20 @@ class HaIceServerSync:
         servers = await self._fetch()
         if servers is None:
             return False
+        if not servers:
+            # HA answered, but with nothing usable — no cloud subscription,
+            # the WebRTC integration absent, or every entry filtered out by
+            # the shape normaliser above. Applying that would REPLACE the
+            # operator's config-derived list (``set_ice_servers`` is a
+            # wholesale swap), leaving the federation transport with zero ICE
+            # servers — not even STUN — and silently degrading every future
+            # handshake to HTTPS. Treat it as "HA has nothing to contribute"
+            # and keep whatever is in effect.
+            log.info(
+                "ha-ice-servers-sync: HA Core returned no usable ICE servers;"
+                " keeping the current list",
+            )
+            return True
         try:
             await self._apply(servers)
         except Exception as exc:  # pragma: no cover — defensive

@@ -111,13 +111,38 @@ SocialHome derives these credentials on demand:
 * **Federation transport** (server-to-server) — `user_id` is the
   local instance's `instance_id`. Credentials are derived once at
   startup and refreshed on subsequent transport rebuilds (after a
-  FAILED PC, after operator-pushed ICE updates via
-  `PUT /api/ha/integration/ice-servers`).
+  FAILED PC, or when a new ICE-server list is applied — see
+  "Home Assistant deployments" below).
 
 Both surfaces use the same shared secret (`webrtc_turn_secret`).
 You do **not** need separate secrets per instance — the
 `expiry:user_id` scheme already binds each credential to its
 consumer.
+
+## Home Assistant deployments (`ha` / `haos`)
+
+Under either Home Assistant mode, Social Home **pulls** an ICE-server list
+from HA Core over the WebSocket (`web_rtc/ice_servers`) once shortly after
+boot and then every 24 h, and that list **replaces** the TOML-derived one
+*for the federation transport*. That is how a Nabu Casa Cloud TURN server
+reaches Social Home without any configuration on your part — and why the
+cadence is daily, roughly matching the cloud credential's lifetime.
+
+What this means for the settings above:
+
+* If HA supplies servers, your `webrtc_turn_url` / `webrtc_turn_secret` are
+  **not** what federation ends up using. Setting them is still worthwhile as
+  the pre-pull default and for the SPA surfaces, which are unaffected by the
+  pull.
+* If HA has nothing to offer (no cloud subscription, WebRTC integration
+  absent) the reply is ignored rather than applied, so your configured
+  servers stay in effect.
+* Every applied list is re-checked by the same diagnostics as boot, so a
+  pulled list with no TURN — or TURN without credentials — is reported in the
+  log rather than failing silently.
+
+Self-hosted and standalone deployments never pull; the TOML settings are the
+steady state there.
 
 If you'd rather use static long-lived credentials (e.g. a hosted
 TURN provider that only supports username/password), set

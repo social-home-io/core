@@ -9,7 +9,12 @@ import aiohttp
 import pytest
 from aiohttp import web
 
-from socialhome.app_keys import db_key, event_bus_key, http_session_key
+from socialhome.app_keys import (
+    db_key,
+    event_bus_key,
+    federation_service_key,
+    http_session_key,
+)
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.infrastructure.event_bus import EventBus
@@ -918,3 +923,106 @@ async def test_get_federation_base_idempotent_if_already_appended(tmp_path):
             == "https://example/api/socialhome/inbox"
         )
     await db.shutdown()
+
+
+# ── ICE-server sync wiring (#423 pull path) ───────────────────────────
+
+
+class _IceHaClient(_FakeHaClient):
+    """Adds the ``web_rtc/ice_servers`` WS reply the sync needs."""
+
+    def __init__(self, result: list | None = None) -> None:
+        super().__init__()
+        self._ice_result = (
+            result
+            if result is not None
+            else [
+                {"urls": "turn:t.example:3478", "username": "u", "credential": "c"},
+            ]
+        )
+
+    async def ws_command(self, type_: str, **fields):  # noqa: ARG002
+        return {"result": self._ice_result}
+
+
+class _RecordingFederation:
+    def __init__(self) -> None:
+        self.applied: list[list[dict]] = []
+
+    def set_ice_servers(self, servers: list[dict]) -> None:
+        self.applied.append(servers)
+
+
+async def _ha_adapter_app(tmp_path, db_key_, bus_key_, session):
+    from socialhome.db.database import AsyncDatabase
+
+    db = AsyncDatabase(str(tmp_path / "t.db"))
+    await db.startup()
+    app = web.Application()
+    app[db_key_] = db
+    app[bus_key_] = EventBus()
+    app[http_session_key] = session
+    return app, db
+
+
+async def test_on_startup_wires_the_ice_sync_and_applies_to_federation(tmp_path):
+    """``on_startup`` must start the pull and route it to the federation
+    service — the ``_apply`` closure had no test at all, so nothing pinned
+    that the fetched list actually lands anywhere."""
+    async with aiohttp.ClientSession() as session:
+        app, _db = await _ha_adapter_app(tmp_path, db_key, event_bus_key, session)
+        fed = _RecordingFederation()
+        app[federation_service_key] = fed
+        adapter = HomeAssistantAdapter(
+            ha_url="http://ha.local:8123",
+            ha_token="",
+            data_dir=str(tmp_path),
+            ha_client=_IceHaClient(),
+        )
+        await adapter.on_startup(app)
+        try:
+            assert adapter._ice_sync is not None, "ICE sync was never created"
+            # Drive one cycle directly rather than racing the loop's timer.
+            assert await adapter._ice_sync.fetch_and_apply_once() is True
+            assert fed.applied == [
+                [{"urls": ["turn:t.example:3478"], "username": "u", "credential": "c"}]
+            ]
+        finally:
+            await adapter.on_cleanup(app)
+        assert adapter._ice_sync is None, "on_cleanup left the sync running"
+
+
+async def test_on_startup_tolerates_no_federation_service(tmp_path):
+    """Federation unwired (or wired later) must not break adapter startup."""
+    async with aiohttp.ClientSession() as session:
+        app, _db = await _ha_adapter_app(tmp_path, db_key, event_bus_key, session)
+        adapter = HomeAssistantAdapter(
+            ha_url="http://ha.local:8123",
+            ha_token="",
+            data_dir=str(tmp_path),
+            ha_client=_IceHaClient(),
+        )
+        await adapter.on_startup(app)
+        assert adapter._ice_sync is None
+        await adapter.on_cleanup(app)
+
+
+async def test_empty_ha_reply_leaves_federation_untouched(tmp_path):
+    """The #1 finding, at the wiring level: HA with nothing to offer must
+    not blank out the operator's configured ICE servers."""
+    async with aiohttp.ClientSession() as session:
+        app, _db = await _ha_adapter_app(tmp_path, db_key, event_bus_key, session)
+        fed = _RecordingFederation()
+        app[federation_service_key] = fed
+        adapter = HomeAssistantAdapter(
+            ha_url="http://ha.local:8123",
+            ha_token="",
+            data_dir=str(tmp_path),
+            ha_client=_IceHaClient(result=[]),
+        )
+        await adapter.on_startup(app)
+        try:
+            assert await adapter._ice_sync.fetch_and_apply_once() is True
+            assert fed.applied == [], "an empty HA list reached set_ice_servers"
+        finally:
+            await adapter.on_cleanup(app)

@@ -288,6 +288,140 @@ async function unpair(instanceId: string) {
 }
 
 
+interface IceOverview {
+  servers: { urls: string[]; kinds: string[]; has_credentials: boolean }[]
+  has_turn: boolean
+  turn_usable: boolean
+  pulls_from_home_assistant: boolean
+}
+
+/**
+ * IceServersPanel — what the federation transport uses to punch through
+ * NAT, secrets stripped.
+ *
+ * Deliberately a collapsed disclosure rather than a visible block: an
+ * operator needs this roughly once, when federation won't connect. But
+ * when they do need it, the alternative today is reading a log warning
+ * they have probably never seen — a missing or credential-less TURN entry
+ * degrades RTC to slow HTTPS in complete silence. Collapsed keeps it out
+ * of the way while making the answer one click away.
+ *
+ * The summary line carries the conclusion so the detail is optional: an
+ * operator can tell at a glance whether a relay is in play.
+ */
+function IceServersPanel() {
+  // Per-mount state, not module-level: the list changes underneath us (an
+  // HA pull replaces it daily), so a panel reopened after navigating away
+  // must refetch rather than show whatever it saw last time.
+  const iceOpen = useSignal(false)
+  const iceLoaded = useSignal(false)
+  const iceServers = useSignal<IceOverview | null>(null)
+  const data = iceServers.value
+  const panelId = 'sh-ice-servers-panel'
+
+  const loadIceServers = async () => {
+    iceLoaded.value = false
+    try {
+      iceServers.value = await api.get(
+        '/api/admin/federation/ice-servers',
+      ) as IceOverview
+    } catch {
+      iceServers.value = null
+    } finally {
+      iceLoaded.value = true
+    }
+  }
+
+  const summary = !iceLoaded.value
+    ? ''
+    : data === null
+      ? 'unavailable'
+      : data.turn_usable
+        ? 'relay ready'
+        : data.has_turn
+          ? 'relay not usable'
+          : 'direct only'
+
+  return (
+    <div class="sh-ice-panel">
+      <button
+        type="button"
+        class="sh-ice-panel__toggle"
+        aria-expanded={iceOpen.value}
+        aria-controls={panelId}
+        onClick={() => {
+          iceOpen.value = !iceOpen.value
+          if (iceOpen.value) void loadIceServers()
+        }}
+      >
+        <span class="sh-ice-panel__caret" aria-hidden="true">
+          {iceOpen.value ? '▾' : '▸'}
+        </span>
+        Connection servers
+        {summary && (
+          <span class={`sh-ice-panel__badge sh-ice-panel__badge--${
+            summary === 'relay ready'
+              ? 'ok'
+              : summary === 'direct only' || summary === 'relay not usable'
+                ? 'warn'
+                : 'muted'
+          }`}>
+            {summary}
+          </span>
+        )}
+      </button>
+      {iceOpen.value && (
+        <div id={panelId} class="sh-ice-panel__body">
+          {!iceLoaded.value && <p class="sh-muted">Loading…</p>}
+          {iceLoaded.value && data === null && (
+            <p class="sh-muted">Couldn’t read the server list.</p>
+          )}
+          {iceLoaded.value && data !== null && (
+            <>
+              {data.servers.length === 0 ? (
+                <p class="sh-muted">
+                  No connection servers configured — households behind most
+                  home routers won’t be able to reach each other directly.
+                </p>
+              ) : (
+                <ul class="sh-ice-list">
+                  {data.servers.map(s => (
+                    <li key={s.urls.join(',')} class="sh-ice-list__item">
+                      <code>{s.urls.join(', ')}</code>
+                      <span class="sh-muted sh-ice-list__note">
+                        {s.kinds.includes('turn') || s.kinds.includes('turns')
+                          ? s.has_credentials
+                            ? 'relay · signed in'
+                            : 'relay · no credentials'
+                          : 'address lookup'}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p class="sh-muted sh-ice-panel__hint">
+                {!data.has_turn
+                  ? 'Only address lookup (STUN) is set up. That is enough for'
+                    + ' most home networks, but not for stricter ones — add a'
+                    + ' relay (TURN) if pairing connects but stays slow.'
+                  : !data.turn_usable
+                    ? 'A relay is listed but has no credentials, so it will be'
+                      + ' rejected and connections quietly fall back to the'
+                      + ' slow path. Check the relay secret.'
+                    : 'A relay is available, so households behind strict'
+                      + ' routers can still reach each other.'}
+                {data.pulls_from_home_assistant
+                  && ' This list comes from Home Assistant and refreshes daily.'}
+              </p>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 //: Module-level like ``autoPairRequests`` above, so the loader can be a
 //: plain function rather than a component-scoped closure the effect would
 //: have to list as a dependency.
@@ -411,6 +545,7 @@ function ExternalUrlSection() {
           configuration.
         </p>
       )}
+      <IceServersPanel />
     </section>
   )
 }

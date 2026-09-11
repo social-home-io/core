@@ -49,6 +49,7 @@ from ..domain.events import (
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.media_validator import validate_inbound_media_meta
+from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from ..domain.federation import (
     BroadcastResult,
     DeliveryResult,
@@ -631,8 +632,16 @@ class FederationService:
         Propagates the new list to the attached transport so future
         DataChannel handshakes pick it up. Existing peers keep their
         current config — renegotiation is out of scope.
+
+        Re-runs the TURN diagnostics on the incoming list. The boot-time
+        checks in ``create_app`` only ever saw the config-derived list, so a
+        replacement arriving later (today: the HA Core pull) could drop TURN
+        entirely, or bring one with no credentials, and nothing said a word —
+        which is what made that class of misconfiguration invisible.
         """
         self._ice_servers = list(servers or [])
+        warn_if_no_turn(self._ice_servers)
+        warn_if_turn_unusable(self._ice_servers)
         if self._transport is not None and hasattr(self._transport, "set_ice_servers"):
             self._transport.set_ice_servers(self._ice_servers)
 

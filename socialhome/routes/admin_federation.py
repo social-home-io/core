@@ -26,6 +26,7 @@ import logging
 from aiohttp import web
 
 from ..app_keys import (
+    config_key,
     db_key,
     federation_repo_key,
     federation_service_key,
@@ -147,6 +148,73 @@ def _validate_base(raw: str) -> str | None:
     if base in ("http:/", "https:/", "http://", "https://"):
         return None
     return base or None
+
+
+def _redact_ice_server(srv: dict) -> dict:
+    """Strip the secret half of an ICE-server entry for display.
+
+    ``credential`` is a real secret — under the recommended coturn
+    TURN-REST setup it is an HMAC of the shared ``webrtc_turn_secret``, so
+    leaking it hands out relay access. ``username`` is only an
+    ``expiry:user_id`` pair, but it is per-credential noise that tells an
+    operator nothing useful, so it is reduced to a boolean too.
+
+    What survives is what an operator actually needs in order to answer
+    "is TURN in play, and is it credentialled?": the URLs and a flag.
+    """
+    urls = [str(u) for u in (srv.get("urls") or []) if isinstance(u, str)]
+    return {
+        "urls": urls,
+        "kinds": sorted({u.split(":", 1)[0].lower() for u in urls if ":" in u}),
+        "has_credentials": bool(srv.get("username") and srv.get("credential")),
+    }
+
+
+class AdminFederationIceServersView(BaseView):
+    """``GET /api/admin/federation/ice-servers`` (admin-only).
+
+    Read-only overview of the ICE servers the **federation transport** is
+    currently using, with secrets removed (:func:`_redact_ice_server`).
+
+    Purely diagnostic. Whether RTC can traverse a given network is the
+    single most opaque thing about a federation deployment — a missing or
+    credential-less TURN entry degrades silently to slow HTTPS, with the
+    only evidence a warning in a log the operator may never read. This
+    surfaces the same facts the boot diagnostics warn about.
+
+    ``source`` reports where the list came from, because under Home
+    Assistant a pulled list replaces the config-derived one and an
+    operator who set ``webrtc_turn_url`` in TOML deserves to know it is
+    not what federation ended up with.
+    """
+
+    async def get(self) -> web.Response:
+        if self.user is None or not self.user.is_admin:
+            return error_response(403, "FORBIDDEN", "Admin only.")
+        fed = self.svc(federation_service_key)
+        raw = list(getattr(fed, "_ice_servers", []) or [])  # noqa: SLF001
+        servers = [_redact_ice_server(s) for s in raw if isinstance(s, dict)]
+        has_turn = any(
+            u.startswith(("turn:", "turns:")) for s in servers for u in s["urls"]
+        )
+        turn_usable = any(
+            s["has_credentials"]
+            and any(u.startswith(("turn:", "turns:")) for u in s["urls"])
+            for s in servers
+        )
+        config = self.svc(config_key)
+        return self._json(
+            {
+                "servers": servers,
+                # Mirrors the boot-time diagnostics so the UI can show the
+                # same conclusion without re-deriving it.
+                "has_turn": has_turn,
+                "turn_usable": turn_usable,
+                # ``ha``/``haos`` pull from HA Core and replace this list;
+                # standalone never does.
+                "pulls_from_home_assistant": config.mode in ("ha", "haos"),
+            }
+        )
 
 
 class AdminFederationExternalUrlView(BaseView):
