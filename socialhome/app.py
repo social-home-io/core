@@ -36,6 +36,7 @@ from .auth import (
     SignedMediaStrategy,
     require_auth,
 )
+from .exception_text import describe_exception
 from .config import Config
 from .crypto import REPLAY_CACHE_WINDOW
 from .db import AsyncDatabase
@@ -54,6 +55,7 @@ from .identity_bootstrap import ensure_instance_identity
 from .infrastructure.user_identity import ensure_user_identities
 from .media_signer import MediaUrlSigner, derive_signing_key
 from .infrastructure import (
+    PAIR_WINDOW_404_ATTEMPTS,
     DeliveryOutcome,
     EventBus,
     IdempotencyCache,
@@ -428,13 +430,32 @@ async def _redeliver_envelope(
                 # too old``, 422 ``Malformed`` etc.) stay PERMANENT —
                 # those are genuinely "the peer will never accept this".
                 if resp.status == 404:
-                    log.info(
-                        "outbox: %s returned 404 (no instance) for %s — "
-                        "retrying (pair-window race)",
+                    # Bounded, not indefinite. The race this covers clears
+                    # in seconds; beyond that the peer genuinely cannot
+                    # resolve the inbox id we hold, and retrying the full
+                    # ladder just burns ~8 hours and a PeerConnection per
+                    # attempt to reach the same conclusion.
+                    if entry.attempts < PAIR_WINDOW_404_ATTEMPTS:
+                        log.info(
+                            "outbox: %s returned 404 (unknown inbox) for %s"
+                            " — attempt %d, retrying (pair-window race)",
+                            entry.instance_id,
+                            entry.id,
+                            entry.attempts + 1,
+                        )
+                        return DeliveryOutcome.TRANSIENT
+                    log.warning(
+                        "outbox: %s still returns 404 for %s after %d"
+                        " attempts — dropping. The peer cannot resolve the"
+                        " inbox id we hold for it: either it has no pairing"
+                        " row for us (re-pair to fix), or its row is still"
+                        " provisional because an auto-pair ack never landed."
+                        " Check this household's entry on that peer.",
                         entry.instance_id,
                         entry.id,
+                        entry.attempts + 1,
                     )
-                    return DeliveryOutcome.TRANSIENT
+                    return DeliveryOutcome.PERMANENT
                 log.warning(
                     "outbox: %s returned terminal HTTP %d for %s — dropping",
                     entry.instance_id,
@@ -450,7 +471,15 @@ async def _redeliver_envelope(
             )
             return DeliveryOutcome.TRANSIENT
     except Exception as exc:
-        log.debug("outbox: redelivery error %s: %s", entry.id, exc)
+        # Same empty-message trap as the transport's send path — and worse
+        # here, because this is the line that explains why an envelope is
+        # being retried at all.
+        log.debug(
+            "outbox: redelivery error %s to %s: %s",
+            entry.id,
+            entry.instance_id,
+            describe_exception(exc),
+        )
         return DeliveryOutcome.TRANSIENT
 
 

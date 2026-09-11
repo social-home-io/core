@@ -36,10 +36,14 @@ def test_aiohttp_timeout_returns_object():
 
 
 class _OutboxEntry:
-    def __init__(self, *, id, instance_id, payload_json):
+    def __init__(self, *, id, instance_id, payload_json, attempts=0):
         self.id = id
         self.instance_id = instance_id
         self.payload_json = payload_json
+        #: Mirrors ``OutboxEntry.attempts``. The 404 path is only
+        #: transient for the first few attempts (see
+        #: ``PAIR_WINDOW_404_ATTEMPTS``), so tests must be able to set it.
+        self.attempts = attempts
 
 
 def _stored_envelope_json(svc, *, to_instance, msg_id="m1"):
@@ -284,13 +288,14 @@ async def test_redeliver_4xx_is_permanent(env):
 
 
 async def test_redeliver_404_is_transient(env):
-    """A 404 ``No instance found`` is transient — the peer just hasn't
+    """A 404 is transient *early on* — the peer may just not have
     installed its RemoteInstance row for us yet. Common in the
     trust-relay pairing window where our PairingConfirmed-driven
     ``INSTANCE_CAPABILITIES_UPDATED`` races ahead of the ack reaching
-    the peer through the relay. Retry until the peer's mirror catches
-    up; ``MAX_ATTEMPTS`` still bounds the loop for genuinely stale
-    rows."""
+    the peer through the relay.
+
+    Bounded by ``PAIR_WINDOW_404_ATTEMPTS`` — see
+    :func:`test_redeliver_404_becomes_permanent_after_the_pair_window`."""
     svc, fed_repo, kek = env
     peer_kp = generate_identity_keypair()
     wrapped = kek.encrypt(b"\x04" * 32)
@@ -497,3 +502,121 @@ async def test_redeliver_re_signs_with_fresh_timestamp(env):
     skew = abs((datetime.now(timezone.utc) - new_ts).total_seconds())
     assert skew < 5, f"redelivered envelope timestamp not refreshed (skew {skew}s)"
     assert posted["timestamp"] != stale_iso
+
+
+async def test_redeliver_404_becomes_permanent_after_the_pair_window(env):
+    """A peer that keeps 404ing is not a race — stop paying for it.
+
+    404 on the inbox path means the peer could not resolve the inbox id
+    we POSTed to. The handshake race that justifies retrying clears in
+    seconds, so retrying the full 13-attempt ladder spent ~8 hours and a
+    fresh PeerConnection per attempt to reach a foregone conclusion. A
+    real deployment showed ~4,400 STUN bindings churning through a stuck
+    54-envelope backlog while the household believed it was federated.
+    """
+    from socialhome.infrastructure import PAIR_WINDOW_404_ATTEMPTS
+
+    svc, fed_repo, kek = env
+    peer_kp = generate_identity_keypair()
+    wrapped = kek.encrypt(b"\x05" * 32)
+    peer = RemoteInstance(
+        id=derive_instance_id(peer_kp.public_key),
+        display_name="peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
+        remote_inbox_url="https://x/wh",
+        local_inbox_id="wh-404-give-up",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
+    )
+    await fed_repo.save_instance(peer)
+
+    class _Resp:
+        def __init__(self, status):
+            self.status = status
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Client:
+        def post(self, url, **kw):
+            return _Resp(404)
+
+    svc._http_client = _Client()
+
+    def _entry(attempts):
+        return _OutboxEntry(
+            id=f"e-404-{attempts}",
+            instance_id=peer.id,
+            payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+            attempts=attempts,
+        )
+
+    # Inside the window: still worth another go.
+    for n in range(PAIR_WINDOW_404_ATTEMPTS):
+        assert (
+            await _redeliver_envelope(svc, fed_repo, _entry(n))
+            is DeliveryOutcome.TRANSIENT
+        ), f"gave up too early at attempt {n}"
+
+    # Past it: drop, rather than burn the rest of the ladder.
+    assert (
+        await _redeliver_envelope(svc, fed_repo, _entry(PAIR_WINDOW_404_ATTEMPTS))
+        is DeliveryOutcome.PERMANENT
+    )
+
+
+async def test_redeliver_404_give_up_says_what_to_check(env, caplog):
+    """The drop must be actionable: an operator seeing this needs to know
+    it is a pairing problem on the peer, not a network fault here."""
+    import logging
+
+    from socialhome.infrastructure import PAIR_WINDOW_404_ATTEMPTS
+
+    svc, fed_repo, kek = env
+    peer_kp = generate_identity_keypair()
+    wrapped = kek.encrypt(b"\x06" * 32)
+    peer = RemoteInstance(
+        id=derive_instance_id(peer_kp.public_key),
+        display_name="peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
+        remote_inbox_url="https://x/wh",
+        local_inbox_id="wh-404-msg",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
+    )
+    await fed_repo.save_instance(peer)
+
+    class _Resp:
+        def __init__(self, status):
+            self.status = status
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Client:
+        def post(self, url, **kw):
+            return _Resp(404)
+
+    svc._http_client = _Client()
+    entry = _OutboxEntry(
+        id="e-404-msg",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+        attempts=PAIR_WINDOW_404_ATTEMPTS,
+    )
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        await _redeliver_envelope(svc, fed_repo, entry)
+
+    # Names both causes, because the log cannot tell them apart.
+    assert "re-pair" in caplog.text
+    assert "provisional" in caplog.text
