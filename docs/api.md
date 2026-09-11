@@ -490,6 +490,7 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 | POST | `/api/admin/federation/resync` | Admin-only. Ask a peer to re-broadcast state for a named scope (§319.6). Body `{instance_id, scope}` where `scope` is `"capabilities"`, `"space:<id>"`, or `"calendar:<id>"` (the latter two replay membership-gated content via the §4.4 resume path). Returns `{"status": "ok", "instance_id", "scope"}`. 400 `UNPROCESSABLE` on a missing `instance_id` / unrecognised scope; 409 `PEER_TOO_OLD` when the peer's advertised `proto_version` is below v_19 (it has no resync handler). |
 | GET | `/api/admin/federation/external-url` | Admin-only. The admin-set federation inbox base URL. Returns `{base, effective, source}` — `base` is the stored value (`null` when unset), `effective` is what `PlatformAdapter.get_federation_base()` actually resolves (the peer-facing URL, i.e. `base` + `/federation/inbox`), and `source` is `"manual"` / `"auto"` / `null`. The two differ whenever an automatic source is also present, so the UI can say which one is in effect rather than leave an admin guessing. |
 | PUT | `/api/admin/federation/external-url` | Admin-only. Upsert `{"base": "https://..."}`. Validates the scheme (http/https), strips a trailing slash, and strips a trailing `/federation/inbox` so pasting a full inbox URL doesn't double it. `{"base": null}` (or an empty string) deletes the row, handing control back to the deployment's automatic source. On a value change, fans out `URL_UPDATED` to every confirmed peer so their cached `remote_inbox_url` tracks the move. Returns `{ok, base, changed, peers_notified}`. 422 `UNPROCESSABLE` on a non-http(s) value. |
+| GET | `/api/admin/federation/ice-servers` | Admin-only, read-only. The ICE servers the **federation transport** is currently using, **with secrets removed**: each entry is `{urls, kinds, has_credentials}` — `credential` is an HMAC of `webrtc_turn_secret` under the recommended coturn setup, so it is never returned, and `username` (an `expiry:user_id` pair) is reduced to the `has_credentials` flag. Also returns `has_turn`, `turn_usable` (the same conclusions the boot diagnostics warn about) and `pulls_from_home_assistant`. Purely diagnostic — whether RTC can traverse a network is otherwise visible only in a log warning. |
 | PATCH | `/api/admin/instance` | Admin-only. Rename the household — set the federated instance display name. Body `{display_name}` (1–80 chars after trimming). Persists `instance_identity.display_name` and re-broadcasts it to every confirmed peer via `INSTANCE_CAPABILITIES_UPDATED`, so paired households see the new name without re-pairing. Returns `{"display_name"}`. 422 `UNPROCESSABLE` on a missing/blank/over-length name. |
 
 ## HFS — Calls & WebRTC
@@ -610,8 +611,33 @@ integration.
 |---|---|---|
 | GET | `/api/ha/integration/federation-base` | Current base the addon advertises. Returns `{"base": string \| null}`. |
 | PUT | `/api/ha/integration/federation-base` | Upsert `{"base": "https://..."}`. Validates scheme (http/https) and strips trailing slash. On value change, fans out `URL_UPDATED` to every confirmed peer. Returns `{ok, base, changed, peers_notified}`. |
-| GET | `/api/ha/integration/ice-servers` | Current operator-pushed STUN/TURN list. Returns `{"ice_servers": [...]}` (empty list when unset). |
-| PUT | `/api/ha/integration/ice-servers` | Upsert `{"ice_servers": [{"urls": [...], "username"?, "credential"?}]}`. Schemes restricted to `stun:`, `stuns:`, `turn:`, `turns:`. Persisted to `instance_config` (replayed on reboot) and pushed live to `FederationService` so future DataChannel handshakes pick up the new list. Returns `{ok, ice_servers, changed}`. |
+
+### WebRTC ICE servers are pulled, not pushed
+
+There is **no** `/api/ha/integration/ice-servers` endpoint. Earlier revisions of
+this page documented a `GET` and a `PUT` there; both were removed and now 404.
+
+Social Home pulls the list itself: `HaIceServerSync`
+(`platform/ha/ice_servers_sync.py`) issues the `web_rtc/ice_servers` command
+over the **HA Core WebSocket**, once shortly after boot and then every 24 h
+(60 s retry after a failure), and applies the result via
+`FederationService.set_ice_servers`. Wired for both `ha` and `haos` in each
+adapter's `on_startup`.
+
+The push was replaced because the integration's listener only fired on YAML
+reloads — so a freshly-rotated Nabu Casa Cloud TURN credential could stay
+invisible for hours — and because a failed push left no record on the Social
+Home side.
+
+Two consequences worth knowing:
+
+* The pulled list **replaces** the config-derived one
+  (`webrtc_stun_url` / `webrtc_turn_url` / …) for the federation transport. A
+  reply with nothing usable in it is ignored rather than applied, so HA without
+  the WebRTC integration cannot blank out an operator's servers.
+* It reaches the **federation** transport only. The SPA's own
+  `/api/webrtc/ice_servers` and the public highlight/moment signalling paths
+  still serve the config-derived list, so under HA those can differ.
 
 ## HFS — Apps
 

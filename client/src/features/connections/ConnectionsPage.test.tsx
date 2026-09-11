@@ -668,3 +668,112 @@ describe('ConnectionsPage — External URL (admin, non-haos)', () => {
     })
   })
 })
+
+describe('ConnectionsPage — connection-servers disclosure', () => {
+  /**
+   * Admin diagnostics for WebRTC. Collapsed by default and fetched only
+   * on open — an operator needs it about once, when federation won't
+   * connect, and until now the only evidence of a bad TURN setup was a
+   * log warning they would likely never see.
+   */
+  async function renderWithIce(ice: unknown) {
+    const { api } = await import('@/api')
+    const { instanceConfig } = await import('@/store/instance')
+    const { currentUser } = await import('@/store/auth')
+    ;(currentUser as { value: unknown }).value = {
+      user_id: 'u1', username: 'admin', display_name: 'Admin', is_admin: true,
+      picture_url: null, bio: null, is_new_member: false,
+    }
+    instanceConfig.value = {
+      mode: 'standalone', instance_name: 'T', instance_id: 'iid',
+      capabilities: [], setup_required: false,
+    }
+    ;(api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url === '/api/admin/federation/ice-servers') return Promise.resolve(ice)
+      if (url === '/api/admin/federation/external-url') {
+        return Promise.resolve({ base: null, effective: null, source: null })
+      }
+      return Promise.resolve([])
+    })
+    const { default: ConnectionsPage } = await import('./ConnectionsPage')
+    const r = render(<ConnectionsPage />)
+    await waitFor(() => {
+      expect(r.container.querySelector('.sh-ice-panel__toggle')).not.toBeNull()
+    })
+    return r
+  }
+
+  it('is collapsed and does not fetch until opened', async () => {
+    const { api } = await import('@/api')
+    const { container } = await renderWithIce({
+      servers: [], has_turn: false, turn_usable: false,
+      pulls_from_home_assistant: false,
+    })
+    const toggle = container.querySelector('.sh-ice-panel__toggle')!
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(container.querySelector('.sh-ice-panel__body')).toBeNull()
+    expect(api.get).not.toHaveBeenCalledWith('/api/admin/federation/ice-servers')
+  })
+
+  it('opens, fetches, and names the relay state', async () => {
+    const { fireEvent } = await import('@testing-library/preact')
+    const { container } = await renderWithIce({
+      servers: [
+        { urls: ['stun:stun.example:3478'], kinds: ['stun'], has_credentials: false },
+        {
+          urls: ['turn:t.example:3478'], kinds: ['turn'], has_credentials: true,
+        },
+      ],
+      has_turn: true, turn_usable: true, pulls_from_home_assistant: false,
+    })
+    const toggle = container.querySelector('.sh-ice-panel__toggle')!
+    fireEvent.click(toggle)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-ice-panel__body')).not.toBeNull()
+    })
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    // aria-controls must point at the panel it reveals.
+    expect(toggle.getAttribute('aria-controls')).toBe(
+      container.querySelector('.sh-ice-panel__body')!.id,
+    )
+    expect(container.textContent).toContain('turn:t.example:3478')
+    expect(container.textContent).toContain('relay ready')
+  })
+
+  it('flags a relay that has no credentials', async () => {
+    const { fireEvent } = await import('@testing-library/preact')
+    const { container } = await renderWithIce({
+      servers: [{ urls: ['turn:t.example:3478'], kinds: ['turn'], has_credentials: false }],
+      has_turn: true, turn_usable: false, pulls_from_home_assistant: false,
+    })
+    fireEvent.click(container.querySelector('.sh-ice-panel__toggle')!)
+    await waitFor(() => {
+      expect(container.textContent).toContain('no credentials')
+    })
+    expect(container.textContent).toContain('relay not usable')
+  })
+
+  it('says so when nothing is configured', async () => {
+    const { fireEvent } = await import('@testing-library/preact')
+    const { container } = await renderWithIce({
+      servers: [], has_turn: false, turn_usable: false,
+      pulls_from_home_assistant: false,
+    })
+    fireEvent.click(container.querySelector('.sh-ice-panel__toggle')!)
+    await waitFor(() => {
+      expect(container.textContent).toContain('No connection servers configured')
+    })
+  })
+
+  it('mentions Home Assistant when the list is pulled from it', async () => {
+    const { fireEvent } = await import('@testing-library/preact')
+    const { container } = await renderWithIce({
+      servers: [{ urls: ['turn:t.example:3478'], kinds: ['turn'], has_credentials: true }],
+      has_turn: true, turn_usable: true, pulls_from_home_assistant: true,
+    })
+    fireEvent.click(container.querySelector('.sh-ice-panel__toggle')!)
+    await waitFor(() => {
+      expect(container.textContent).toContain('comes from Home Assistant')
+    })
+  })
+})

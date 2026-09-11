@@ -8,6 +8,13 @@ from unittest.mock import AsyncMock
 from socialhome.platform.ha.ice_servers_sync import HaIceServerSync
 
 
+def _client_returning(result):
+    """An HaClient stub whose ``ws_command`` yields ``result``."""
+    client = AsyncMock()
+    client.ws_command.return_value = {"result": result}
+    return client
+
+
 # ─── _fetch shape handling ────────────────────────────────────────────────
 
 
@@ -208,3 +215,67 @@ async def test_loop_uses_error_retry_after_failure():
     assert applied == [[{"urls": ["stun:r.example"]}]]
     assert client.ws_command.await_count >= 2
     await sync.stop()
+
+
+# ── An empty HA reply must not wipe the operator's servers ────────────
+
+
+async def test_empty_ha_list_is_not_applied():
+    """HA answering with nothing must leave the current list alone.
+
+    ``set_ice_servers`` is a wholesale swap, so applying ``[]`` would strip
+    the config-derived STUN *and* TURN from the federation transport,
+    leaving zero ICE servers and silently degrading every future handshake
+    to HTTPS. HA Core returns an empty list whenever the WebRTC
+    integration is absent or there is no cloud subscription — an ordinary
+    deployment, not an error.
+    """
+    applied: list[list[dict]] = []
+
+    async def _apply(servers: list[dict]) -> None:
+        applied.append(servers)
+
+    sync = HaIceServerSync(
+        client=_client_returning([]),
+        apply_callback=_apply,
+    )
+    # Reported as success: HA answered, we simply have nothing to change.
+    assert await sync.fetch_and_apply_once() is True
+    assert applied == [], "an empty list was applied over the existing one"
+
+
+async def test_list_of_only_malformed_entries_is_not_applied():
+    """Same guard, reached via the normaliser rather than an empty reply.
+
+    A reply full of unusable entries filters down to ``[]``, which must be
+    treated identically — otherwise a malformed HA response is just as
+    destructive as an empty one.
+    """
+    applied: list[list[dict]] = []
+
+    async def _apply(servers: list[dict]) -> None:
+        applied.append(servers)
+
+    sync = HaIceServerSync(
+        client=_client_returning(
+            [{"no_urls": True}, {"urls": []}, "not-a-dict", {"urls": [""]}],
+        ),
+        apply_callback=_apply,
+    )
+    assert await sync.fetch_and_apply_once() is True
+    assert applied == []
+
+
+async def test_non_empty_list_is_still_applied():
+    """The guard must not block the normal case."""
+    applied: list[list[dict]] = []
+
+    async def _apply(servers: list[dict]) -> None:
+        applied.append(servers)
+
+    sync = HaIceServerSync(
+        client=_client_returning([{"urls": "stun:stun.example:3478"}]),
+        apply_callback=_apply,
+    )
+    assert await sync.fetch_and_apply_once() is True
+    assert applied == [[{"urls": ["stun:stun.example:3478"]}]]

@@ -11951,6 +11951,59 @@ a.sh-welcome-card:hover {
    rather than push the section wider than the viewport. */
 .sh-external-url-section code { overflow-wrap: anywhere; }
 
+/* ── Connection-servers disclosure (admin diagnostics) ──────────────────
+   Collapsed by default and styled down: an operator needs this about once,
+   when federation won't connect, so it must not compete with the rest of
+   the page. */
+.sh-ice-panel { margin-top: var(--sh-space-sm); }
+.sh-ice-panel__toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  /* Reset the UA button box — this is a disclosure, not a control. The
+     ``font: inherit`` is load-bearing; without it the label renders in the
+     browser's default form font. */
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  background: none;
+  border: 0;
+  padding: var(--sh-space-xs) 0;
+  color: var(--sh-text-muted);
+  cursor: pointer;
+  min-height: 36px;   /* tap-target floor */
+}
+.sh-ice-panel__toggle:hover { color: var(--sh-text); }
+.sh-ice-panel__caret { font-size: 0.8em; }
+.sh-ice-panel__badge {
+  font-size: var(--sh-font-size-xs);
+  padding: 1px var(--sh-space-xs);
+  border-radius: var(--sh-radius-sm);
+  border: 1px solid var(--sh-border-strong);
+}
+.sh-ice-panel__badge--ok { color: var(--sh-text); }
+.sh-ice-panel__badge--warn {
+  color: var(--sh-text);
+  border-color: var(--sh-text-muted);
+}
+.sh-ice-panel__badge--muted { color: var(--sh-text-muted); }
+.sh-ice-panel__body { padding-left: var(--sh-space-md); }
+.sh-ice-list { list-style: none; margin: 0; padding: 0; }
+.sh-ice-list__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sh-space-xs) var(--sh-space-sm);
+  padding: 2px 0;
+  font-size: var(--sh-font-size-sm);
+}
+/* A TURN/STUN URL is one unbroken token — break it rather than overflow. */
+.sh-ice-list__item code { overflow-wrap: anywhere; }
+.sh-ice-list__note { font-size: var(--sh-font-size-xs); }
+.sh-ice-panel__hint {
+  font-size: var(--sh-font-size-xs);
+  margin: var(--sh-space-xs) 0 0;
+}
+
 .sh-auto-pair-inbox {
   padding: var(--sh-space-md);
   background: linear-gradient(

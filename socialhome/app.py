@@ -628,7 +628,17 @@ def _wire_federation_stack(
         own_instance_id=identity.instance_id,
         own_identity_seed=identity.identity_seed,
         own_identity_pk=identity.identity_public_key,
-        ice_servers=_default_ice_servers(config),
+        # ``hmac_user_id`` matters: without it a ``webrtc_turn_secret``
+        # deployment gets TURN entries carrying no username/credential.
+        # This list is not idle — space sync reads it and ships it to the
+        # peer inside SPACE_SYNC_OFFER, so a credential-less entry is
+        # advertised to the far side, coturn rejects it, and the session
+        # quietly falls back to HTTPS. The transport builds its own list
+        # with the id further down; these two must agree.
+        ice_servers=_default_ice_servers(
+            config,
+            hmac_user_id=identity.instance_id,
+        ),
         own_pq_seed=identity.pq_seed,
         own_pq_pk=identity.pq_public_key,
         sig_suite=config.federation_sig_suite,

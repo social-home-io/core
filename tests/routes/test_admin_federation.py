@@ -390,3 +390,92 @@ async def test_external_url_unchanged_value_reports_not_changed(client):
         body = await resp.json()
     assert body["changed"] is False
     assert body["peers_notified"] == 0
+
+
+# ── GET /api/admin/federation/ice-servers ─────────────────────────────
+#
+# Read-only diagnostic overview. Whether RTC can traverse a network is
+# the most opaque thing about a federation deployment: a missing or
+# credential-less TURN entry degrades silently to HTTPS, with the only
+# evidence a log warning nobody reads.
+
+
+async def test_ice_servers_requires_admin(client):
+    db = client._db
+    await db.enqueue("UPDATE users SET is_admin=0 WHERE user_id=?", (client._uid,))
+    resp = await client.get(
+        "/api/admin/federation/ice-servers", headers=_auth(client._tok)
+    )
+    assert resp.status == 403
+
+
+async def test_ice_servers_never_leaks_the_credential(client):
+    """The whole point of the redaction: ``credential`` is an HMAC of the
+    operator's shared secret, so exposing it hands out relay access."""
+    from socialhome.app_keys import federation_service_key
+
+    fed = client.app[federation_service_key]
+    fed.set_ice_servers(
+        [
+            {"urls": ["stun:stun.example:3478"]},
+            {
+                "urls": ["turn:t.example:3478", "turns:t.example:5349"],
+                "username": "1780000000:iid",
+                "credential": "SUPER-SECRET-HMAC",
+            },
+        ],
+    )
+
+    resp = await client.get(
+        "/api/admin/federation/ice-servers", headers=_auth(client._tok)
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    # Serialise the whole response and scan it, so a secret leaking via
+    # any field (not just the one we thought of) still fails the test.
+    raw = str(body)
+
+    assert "SUPER-SECRET-HMAC" not in raw
+    assert "1780000000:iid" not in raw
+    # The useful facts survive.
+    assert body["servers"][1]["urls"] == [
+        "turn:t.example:3478",
+        "turns:t.example:5349",
+    ]
+    assert body["servers"][1]["has_credentials"] is True
+    assert body["servers"][0]["has_credentials"] is False
+    assert body["has_turn"] is True
+    assert body["turn_usable"] is True
+
+
+async def test_ice_servers_flags_a_credential_less_turn(client):
+    """`turn_usable` must be false for TURN with no credentials — the
+    case that silently falls back to HTTPS."""
+    from socialhome.app_keys import federation_service_key
+
+    client.app[federation_service_key].set_ice_servers(
+        [{"urls": ["turn:t.example:3478"]}],
+    )
+    resp = await client.get(
+        "/api/admin/federation/ice-servers", headers=_auth(client._tok)
+    )
+    body = await resp.json()
+    assert body["has_turn"] is True
+    assert body["turn_usable"] is False
+
+
+async def test_ice_servers_reports_stun_only(client):
+    from socialhome.app_keys import federation_service_key
+
+    client.app[federation_service_key].set_ice_servers(
+        [{"urls": ["stun:stun.example:3478"]}],
+    )
+    resp = await client.get(
+        "/api/admin/federation/ice-servers", headers=_auth(client._tok)
+    )
+    body = await resp.json()
+    assert body["has_turn"] is False
+    assert body["turn_usable"] is False
+    assert body["servers"][0]["kinds"] == ["stun"]
+    # standalone in tests — nothing replaces the config list here.
+    assert body["pulls_from_home_assistant"] is False

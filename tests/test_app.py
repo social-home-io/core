@@ -150,3 +150,45 @@ async def test_app_federation_service_wired_into_app(tmp_dir):
             "FederationTransport._app_inbound_handler is None — "
             "app_inbound_handler= kwarg missing from FederationTransport()"
         )
+
+
+async def test_federation_service_ice_servers_carry_hmac_credentials(tmp_dir):
+    """The FederationService's ICE list must be HMAC-credentialled.
+
+    It is not an idle copy: space sync reads it and ships it to the remote
+    peer inside ``SPACE_SYNC_OFFER``. Built without ``hmac_user_id`` it
+    yields a TURN entry with no username/credential, so we advertise an
+    entry coturn will reject and the session quietly drops to HTTPS —
+    permanently in standalone, where no HA pull ever replaces the list.
+
+    Pinned against the real ``create_app`` wiring rather than
+    ``_default_ice_servers`` directly, because the bug was precisely that
+    the call site omitted the argument while the helper was fine.
+    """
+    from socialhome.app_keys import federation_service_key
+
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+        webrtc_turn_url="turn:turn.example.com:3478",
+        webrtc_turn_secret="s3cr3t",
+    )
+    app = create_app(cfg)
+    # ``_wire_federation_stack`` runs from the startup hook, not
+    # ``create_app``, so the service only exists once the app is started.
+    async with TestClient(TestServer(app)) as tc:
+        resp = await tc.get("/healthz")
+        assert resp.status == 200
+        fed = app[federation_service_key]
+
+    turn = [
+        s
+        for s in fed._ice_servers  # noqa: SLF001 — asserting wiring
+        if any(u.startswith(("turn:", "turns:")) for u in s.get("urls", []))
+    ]
+    assert turn, "no TURN entry in the federation service's ICE list"
+    assert turn[0].get("username"), "TURN entry has no HMAC username"
+    assert turn[0].get("credential"), "TURN entry has no HMAC credential"

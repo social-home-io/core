@@ -328,6 +328,7 @@ from .moments_public import (
 from .admin_federation import (
     AdminFederationCompatView,
     AdminFederationExternalUrlView,
+    AdminFederationIceServersView,
     AdminFederationResyncView,
 )
 from .admin_instance import AdminInstanceView
@@ -449,6 +450,10 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view(
         "/api/admin/federation/external-url",
         AdminFederationExternalUrlView,
+    )
+    app.router.add_view(
+        "/api/admin/federation/ice-servers",
+        AdminFederationIceServersView,
     )
     app.router.add_view("/api/admin/instance", AdminInstanceView)
     app.router.add_view("/api/me/export", MeExportView)

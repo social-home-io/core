@@ -154,4 +154,8 @@ def warn_if_turn_unusable(ice_servers: list[dict]) -> None:
                 "docs/operations/turn.md.",
                 urls[0] if urls else "?",
             )
-        return
+        # Deliberately NOT ``return`` here. An earlier revision bailed out
+        # after the first TURN entry, which was harmless while the only
+        # caller was ``build_ice_servers`` (it emits at most one), but this
+        # is now also handed HA Core's pulled list, which can carry several
+        # — and a bad entry behind a good one must still be reported.
